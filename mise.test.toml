@@ -1,0 +1,7 @@
+# Optional extended lint tooling; normal builds and checks need only Go and Terraform.
+[tools]
+golangci-lint = "2.14.0"
+
+[tasks.lint]
+description = "Run Go correctness, layout and Testify checks"
+run = "golangci-lint run ./..."

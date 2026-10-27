@@ -1,0 +1,60 @@
+[tools]
+go = "1.26.10"
+terraform = "1.14.6"
+
+[tasks.build]
+description = "Build the local provider binary"
+run = "go build -o terraform-provider-cipherstash ."
+
+[tasks.test]
+description = "Run offline Terraform CLI and fixture tests with the race detector"
+# plugin-testing treats every nonempty value, including "0", as opt-in.
+run = "TF_ACC= go test -race ./... -count=1"
+
+[tasks.vet]
+description = "Run Go vet"
+run = "go vet ./..."
+
+[tasks.fmt-check]
+description = "Check Go formatting without modifying files"
+run = '''
+set -eu
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+  printf '%s\n' "$unformatted"
+  exit 1
+fi
+'''
+
+[tasks.check]
+description = "Run non-mutating local tests, vet and formatting checks"
+depends = ["test", "vet", "fmt-check"]
+
+[tasks.docs]
+description = "Regenerate provider reference documentation with pinned tfplugindocs"
+run = "go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@v0.25.0 generate --provider-name cipherstash"
+
+[tasks.install-local]
+description = "Build and install the development provider into the local Terraform mirror"
+depends = ["build"]
+run = '''
+set -eu
+mirror="$PWD/.local/mirror"
+platform="$(go env GOOS)_$(go env GOARCH)"
+provider_dir="$mirror/terraform.local/bndry-co/cipherstash/0.0.1/$platform"
+mkdir -p "$provider_dir"
+cp terraform-provider-cipherstash "$provider_dir/terraform-provider-cipherstash_v0.0.1"
+printf 'provider_installation {\n  filesystem_mirror {\n    path = "%s"\n    include = ["terraform.local/bndry-co/cipherstash"]\n  }\n  direct {\n    exclude = ["terraform.local/bndry-co/cipherstash"]\n  }\n}\n' "$mirror" > .local/terraform.rc
+printf 'Set TF_CLI_CONFIG_FILE=%s/.local/terraform.rc\n' "$PWD"
+'''
+
+[tasks."test:acc"]
+description = "Run LIVE actor/client acceptance in an explicitly approved workspace (requires TF_ACC=1)"
+run = '''
+set -eu
+if [ "${TF_ACC:-}" != 1 ]; then
+  echo 'Live acceptance requires explicit TF_ACC=1 and coordinated workspace access.' >&2
+  exit 1
+fi
+go test ./internal/provider -run '^TestAccActorAndClientLifecycle$' -count=1 -v
+'''

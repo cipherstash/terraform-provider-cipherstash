@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    - wsl_v5
+    - testifylint
+  settings:
+    wsl_v5:
+      default: none
+      enable:
+        - after-defer
+        - after-block
+        - return
+      branch-max-lines: 2
+    testifylint:
+      disable-all: true
+      enable:
+        - go-require
+        - require-error
+
+formatters:
+  enable:
+    - gofumpt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false
