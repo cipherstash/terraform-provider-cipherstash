@@ -1,0 +1,10 @@
+/terraform-provider-cipherstash
+/go.work
+/go.work.sum
+/.local/
+**/.terraform/
+/examples/**/.terraform.lock.hcl
+*.tfstate*
+*.tfplan
+.env*
+crash.log
