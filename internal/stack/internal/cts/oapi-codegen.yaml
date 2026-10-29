@@ -1,0 +1,28 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oapi-codegen/oapi-codegen/v2.8.0/configuration-schema.json
+package: cts
+output: client.gen.go
+generate:
+  client: true
+  models: true
+  server-urls: true
+  # internal/ctstest builds its fake CTS on the generated server.
+  std-http-server: true
+output-options:
+  overlay:
+    path: overlay.yaml
+  # Generated types back the public manage API, so use Go initialisms (ID, not Id).
+  name-normalizer: ToCamelCaseWithInitialisms
+  response-type-suffix: HTTPResponse
+  include-operation-ids:
+    - authorize
+    - get_jwks_handler
+    - createActor
+    - deleteActor
+    - listAccessKeys
+    - listActors
+  # Identifiers stay opaque strings; the service validates their syntax.
+  type-mapping:
+    string:
+      formats:
+        uuid:
+          type: string

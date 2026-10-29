@@ -1,0 +1,86 @@
+overlay: 1.0.0
+x-speakeasy-jsonpath: rfc9535
+info:
+  title: CipherStash CTS Go client overlay
+  version: 1.0.0
+actions:
+  # Build the regional CTS URL from the validated CRN region/provider segment.
+  # Keep the downloaded vendor spec unchanged.
+  - target: $.servers[0]
+    update:
+      url: https://{region}.cts.cipherstashmanaged.net/
+      description: CipherStash Token Service
+      x-go-name: ServerURL
+      variables:
+        region:
+          default: ap-southeast-2.aws
+  # Provisioning only uses access keys. Replace the credential union locally
+  # so callers can construct a typed request without OIDC union helpers.
+  - target: $.components.schemas.AuthorizeRequest.allOf
+    remove: true
+  - target: $.components.schemas.AuthorizeRequest
+    update:
+      type: object
+      description: An access-key authorization request with an optional audience.
+      required:
+        - accessKey
+      properties:
+        accessKey:
+          $ref: "#/components/schemas/RawAccessKey"
+        audience:
+          type:
+            - string
+            - 'null'
+          description: Optional audience for the generated token. If not provided, defaults to the workspace's host FQDN.
+  # The vendor reuses list, create and delete as operation IDs. Give the
+  # consumed operations unique names; keep the downloaded vendor spec unchanged.
+  - target: $
+    update:
+      paths:
+        /api/access-keys:
+          get:
+            operationId: listAccessKeys
+        /api/actors:
+          get:
+            operationId: listActors
+          post:
+            operationId: createActor
+        /api/actors/{actor_identifier}:
+          delete:
+            operationId: deleteActor
+  # Keep the public int64 and int inputs without narrowing before server validation.
+  - target: $.components.schemas.CreateActorRequest.properties.tokenExpiry
+    update:
+      x-go-type: int64
+  - target: $.paths["/api/actors"].get.parameters[?(@.name == "limit")].schema
+    update:
+      x-go-type: int
+  # Name the types that package manage re-exports.
+  - target: $.components.schemas.CreateActorRequest
+    update:
+      x-go-type-name: CreateActorOptions
+  - target: $.components.schemas.ActorSummary
+    update:
+      x-go-type-name: Actor
+  - target: $.components.schemas.ListActorsResponse
+    update:
+      x-go-type-name: ActorPage
+  - target: $.components.schemas.AccessKey
+    update:
+      x-go-type-name: AccessKeyMetadata
+  - target: $.components.schemas.ActorSummary.properties.actorId
+    update:
+      x-go-name: ID
+  - target: $.components.schemas.AccessKey.properties.keyId
+    update:
+      x-go-name: ID
+  - target: $.components.schemas.AccessKey.properties.keyName
+    update:
+      x-go-name: Name
+  # An empty role or cursor means the service default or the last page.
+  - target: $.components.schemas.CreateActorRequest.properties.role
+    update:
+      x-go-type-skip-optional-pointer: true
+  - target: $.components.schemas.ListActorsResponse.properties.nextCursor
+    update:
+      x-go-type-skip-optional-pointer: true
