@@ -1,0 +1,46 @@
+overlay: 1.0.0
+info:
+  title: CipherStash ZeroKMS administration Go client overlay
+  version: 1.0.0
+actions:
+  - target: '$.components.schemas.CreateClientResponse.properties.description'
+    description: Distinguish missing or null from a valid empty description.
+    update:
+      x-go-type: '*string'
+  - target: '$.components.schemas.Keyset.properties.description'
+    description: Distinguish missing or null from a valid empty description.
+    update:
+      x-go-type: '*string'
+  - target: '$.components.schemas.Keyset.properties.is_disabled'
+    description: Distinguish missing or null from a valid false state.
+    update:
+      x-go-type: '*bool'
+  - target: '$.components.schemas.CreateClientResponse.properties.client_key'
+    description: Hand off the encoded key rather than JSON-decoding base64 to bytes.
+    update:
+      x-go-type: string
+  - target: '$.components.schemas.CreatedClient.properties.client_key'
+    description: The nested creation result uses the same encoded-key handoff.
+    update:
+      x-go-type: string
+  - target: '$.components.schemas.CreateKeysetRequest'
+    description: Name the types that package manage re-exports.
+    update:
+      x-go-type-name: CreateKeysetOptions
+  - target: '$.components.schemas.CreateClientSpec'
+    update:
+      x-go-type-name: CreateKeysetClientOptions
+  - target: '$.components.schemas.CreateClientRequest'
+    update:
+      x-go-type-name: CreateClientOptions
+  - target: '$.components.schemas.ListKeysetRequest'
+    update:
+      x-go-type-name: ListKeysetsOptions
+  - target: '$.components.schemas.CreateClientRequest.properties.keyset_id'
+    description: An empty keyset ID selects the workspace's default keyset.
+    update:
+      x-go-type-skip-optional-pointer: true
+  - target: '$.components.schemas.ListKeysetRequest.properties.show_disabled'
+    description: False and omitted both exclude disabled keysets.
+    update:
+      x-go-type-skip-optional-pointer: true
