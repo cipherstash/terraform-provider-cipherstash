@@ -5,7 +5,7 @@ import (
 	"flag"
 	"log"
 
-	"github.com/bndry-co/terraform-provider-cipherstash/internal/provider"
+	"github.com/cipherstash/terraform-provider-cipherstash/internal/provider"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6/tf6server"
 )
@@ -26,7 +26,7 @@ func main() {
 			}
 		}()
 
-		return tf6server.Serve("terraform.local/bndry-co/cipherstash", func() tfprotov6.ProviderServer {
+		return tf6server.Serve("terraform.local/cipherstash/cipherstash", func() tfprotov6.ProviderServer {
 			return provider.Protocol6(p)
 		}, opts...)
 	}()

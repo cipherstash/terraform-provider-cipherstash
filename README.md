@@ -2,7 +2,7 @@
 
 Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; the CipherStash Go SDK handles authentication and service requests.
 
-**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/bndry-co/cipherstash` at version `0.0.1`. You need the coordinated Go SDK checkout and its built authentication WebAssembly module (the auth guest). The SDK auth/control changes are not yet available as an installable dependency, so `go.mod` does not specify an SDK release. A clean checkout alone is not a reproducible distribution. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
+**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. You need the coordinated Go SDK checkout and its built authentication WebAssembly module (the auth guest). The SDK auth/control changes are not yet available as an installable dependency, so `go.mod` does not specify an SDK release. A clean checkout alone is not a reproducible distribution. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
 
 ## Before you start
 
@@ -140,7 +140,7 @@ export TF_CLI_CONFIG_FILE="$PWD/.local/terraform.rc"
 
 These commands check and install the provider locally without creating CipherStash resources. Use your own Terraform root with the local provider address and version above. To plan against a workspace, supply its Admin access key securely through `CIPHERSTASH_ACCESS_KEY`; do not put the key in shell history or committed variable files. Review the plan and coordinate shared-workspace access before any apply.
 
-A lockfile generated from the local mirror describes your local build, not a published provider. After rebuilding changed source, refresh that root's provider checksum with `terraform providers lock -fs-mirror=<provider checkout>/.local/mirror terraform.local/bndry-co/cipherstash` before initializing again. Do not use this development-version process for a production lockfile.
+A lockfile generated from the local mirror describes your local build, not a published provider. After rebuilding changed source, refresh that root's provider checksum with `terraform providers lock -fs-mirror=<provider checkout>/.local/mirror terraform.local/cipherstash/cipherstash` before initializing again. Do not use this development-version process for a production lockfile.
 
 ### Run local checks
 

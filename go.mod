@@ -1,4 +1,4 @@
-module github.com/bndry-co/terraform-provider-cipherstash
+module github.com/cipherstash/terraform-provider-cipherstash
 
 go 1.26.10
 

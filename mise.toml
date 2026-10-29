@@ -41,10 +41,10 @@ run = '''
 set -eu
 mirror="$PWD/.local/mirror"
 platform="$(go env GOOS)_$(go env GOARCH)"
-provider_dir="$mirror/terraform.local/bndry-co/cipherstash/0.0.1/$platform"
+provider_dir="$mirror/terraform.local/cipherstash/cipherstash/0.0.1/$platform"
 mkdir -p "$provider_dir"
 cp terraform-provider-cipherstash "$provider_dir/terraform-provider-cipherstash_v0.0.1"
-printf 'provider_installation {\n  filesystem_mirror {\n    path = "%s"\n    include = ["terraform.local/bndry-co/cipherstash"]\n  }\n  direct {\n    exclude = ["terraform.local/bndry-co/cipherstash"]\n  }\n}\n' "$mirror" > .local/terraform.rc
+printf 'provider_installation {\n  filesystem_mirror {\n    path = "%s"\n    include = ["terraform.local/cipherstash/cipherstash"]\n  }\n  direct {\n    exclude = ["terraform.local/cipherstash/cipherstash"]\n  }\n}\n' "$mirror" > .local/terraform.rc
 printf 'Set TF_CLI_CONFIG_FILE=%s/.local/terraform.rc\n' "$PWD"
 '''
 
