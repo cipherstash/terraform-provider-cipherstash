@@ -11,11 +11,16 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	"github.com/stretchr/testify/assert"
 )
 
 const fixtureTimestamp = "2026-10-26T00:00:00Z"
+
+// Management models are not wire types; use the service's snake_case fields.
+func keysetJSON(k control.Keyset) map[string]any {
+	return map[string]any{"id": k.ID, "name": k.Name, "description": k.Description, "is_disabled": k.IsDisabled, "is_default": k.IsDefault}
+}
 
 // This fixture models service inventory only. Terraform owns plans, state,
 // replacement and recovery in the CLI tests. It is not evidence of live API behavior.
@@ -135,9 +140,9 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		id := input.Kind + "-" + f.newID()
-		actor := control.Actor{ID: id, Name: *input.Name, Kind: input.Kind, CreatedAt: fixtureTimestamp}
+		actor := control.Actor{ID: id, Name: *input.Name, Kind: control.ActorKind(input.Kind), CreatedAt: fixtureTimestamp}
 		f.actors = append(f.actors, actor)
-		f.keys = append(f.keys, control.AccessKeyMetadata{ID: "key-" + id, Name: actor.Name, Role: input.Role, CreatedAt: fixtureTimestamp})
+		f.keys = append(f.keys, control.AccessKeyMetadata{ID: "key-" + id, Name: actor.Name, Role: control.Role(input.Role), CreatedAt: fixtureTimestamp})
 		f.secrets[id] = "CSAK" + id + ".fixture-secret"
 		body = map[string]any{"actorId": id, "name": actor.Name, "kind": actor.Kind, "role": input.Role, "createdAt": actor.CreatedAt, "accessKey": f.secrets[id]}
 		if f.failActorMetadata {
@@ -210,12 +215,12 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		k := control.Keyset{ID: f.newID(), Name: *input.Name, Description: *input.Description}
 		f.keysets = append(f.keysets, k)
-		body, mutation = k, true
+		body, mutation = keysetJSON(k), true
 	case r.Method == http.MethodPost && r.URL.Path == "/list-keysets":
-		items := []control.Keyset{}
+		items := []map[string]any{}
 		for _, k := range f.keysets {
 			if input.ShowDisabled || !k.IsDisabled {
-				items = append(items, k)
+				items = append(items, keysetJSON(k))
 			}
 		}
 
@@ -275,6 +280,10 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "fixture-upstream-secret", fault.status)
 
 		return
+	}
+
+	if r.Method == http.MethodPost && r.URL.Path == "/api/actors" {
+		w.WriteHeader(http.StatusCreated)
 	}
 
 	assert.NoError(f.t, json.NewEncoder(w).Encode(body), "fixture response failed")

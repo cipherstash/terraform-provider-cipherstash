@@ -11,7 +11,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -60,9 +60,7 @@ func cliTestCase(t *testing.T, f *serviceFixture) resource.TestCase {
 		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
 			"cipherstash": func() (tfprotov6.ProviderServer, error) {
 				p := New()
-				t.Cleanup(func() {
-					assert.NoError(t, p.Close())
-				})
+				t.Cleanup(p.Close)
 
 				return Protocol6(p), nil
 			},

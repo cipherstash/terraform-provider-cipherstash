@@ -3,7 +3,7 @@ package provider
 import (
 	"context"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"

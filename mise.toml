@@ -2,6 +2,9 @@
 go = "1.26.10"
 terraform = "1.14.6"
 
+[env]
+GOWORK = "off"
+
 [tasks.build]
 description = "Build the local provider binary"
 run = "go build -o terraform-provider-cipherstash ."

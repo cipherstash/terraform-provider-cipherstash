@@ -1,8 +1,8 @@
 # Terraform provider for CipherStash
 
-Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; the CipherStash Go SDK handles authentication and service requests.
+Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; this repository's native `internal/stack/auth` and `internal/stack/manage` packages handle authentication and service requests.
 
-**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. You need the coordinated Go SDK checkout and its built authentication WebAssembly module (the auth guest). The SDK auth/control changes are not yet available as an installable dependency, so `go.mod` does not specify an SDK release. A clean checkout alone is not a reproducible distribution. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
+**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. A clean checkout builds with the pinned Go toolchain and module dependencies; no sibling SDK checkout, Go workspace, Rust toolchain or WebAssembly authentication guest is required. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
 
 ## Before you start
 
@@ -34,13 +34,13 @@ provider "cipherstash" {
 
 Supply the key securely through `CIPHERSTASH_ACCESS_KEY` or the sensitive `access_key` argument. An omitted or null argument uses the environment variable. An empty string or a value that is unknown during provider configuration is an error, not a request to use the environment. These are the provider's credentials, not the application's `CS_CLIENT_*` configuration.
 
-The SDK uses `auth.WithAcceptedRoles("Admin")` to check the role in each decoded token. This is a configuration guard, not signature verification or authorization. The CipherStash Token Service (CTS) and ZeroKMS authorize service requests. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; the provider's Admin requirement does not mean your application needs Admin.
+Native authentication verifies each exchanged token's RS256 signature against the CipherStash Token Service (CTS) signing keys, issuer, audience, expiry, workspace and Admin role. It also validates the advertised ZeroKMS endpoint before use. Each provider instance owns its token cache and authentication lifetime; reconfiguration and shutdown cancel token refresh. CTS and ZeroKMS still authorize each service request. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; the provider's Admin requirement does not mean your application needs Admin.
 
 ### Protect state and credentials
 
 Terraform marks returned access keys and client key values as sensitive, but **stores resource secrets in state and saved plans**. Sensitive marking hides values in normal display; it does not encrypt them or prevent JSON/raw outputs from revealing them. Sensitive provider inputs can also appear in saved plans. Reading the provider's access key from the environment is not the same as storing a resource's returned key in state.
 
-Use an encrypted state backend with restricted access. Protect backups and saved plans, and never commit credentials, state, or plan files. The provider does not display upstream error bodies, which can contain submitted data. The SDK clears its secret buffers, but Terraform still holds string copies.
+Use an encrypted state backend with restricted access. Protect backups and saved plans, and never commit credentials, state, or plan files. The provider does not display upstream error bodies, which can contain submitted data. The provider clears exported creation-secret buffers, but Terraform still holds string copies.
 
 ## Choose what Terraform manages
 
@@ -127,12 +127,11 @@ The repository's example configurations have been removed. If you used them, pre
 
 ## Develop and verify locally
 
-Install [mise](https://mise.jdx.dev/) and obtain the coordinated SDK checkout with its built auth guest. `mise.toml` pins Go 1.26.10 and Terraform 1.14.6. Use an ignored Go workspace to connect the checkouts; do not add an absolute-path replacement to `go.mod`.
+Install [mise](https://mise.jdx.dev/). `mise.toml` pins Go 1.26.10 and Terraform 1.14.6 and sets `GOWORK=off`, so builds and tests use only this repository's module dependencies.
 
 ```sh
 mise trust
 mise install
-mise exec -- go work init . /path/to/stack/languages/golang
 mise run check
 mise run install-local
 export TF_CLI_CONFIG_FILE="$PWD/.local/terraform.rc"
@@ -161,14 +160,14 @@ The offline suite has three layers:
 | Layer | What it establishes |
 | --- | --- |
 | Terraform CLI (`cli_test.go`) | Real Terraform 1.14.6 plans, applies, persisted imports, refresh, replacement and destroy through the protocol server. Checks dependent resources and lookups, sensitive secrets, grant ownership, external drift and validation. Failed-create and create-before-destroy cases inspect the next plan's saved identities and secrets, including deposed objects, then recover and check for orphans. |
-| Direct SDK-backed tests (`failures_test.go`, `crud_test.go`, `provider_test.go`) | State retention on failed inventory reads, pagination and metadata ambiguity, partial keyset writes, uncertain grant/revoke outcomes, confirmed destroy, credential precedence, session ownership and cancellation. The real SDK auth guest uses local token-exchange and HTTP fixtures; upstream error bodies must not enter diagnostics. |
+| Direct native-backed tests (`failures_test.go`, `crud_test.go`, `provider_test.go`) | State retention on failed inventory reads, pagination and metadata ambiguity, partial keyset writes, uncertain grant/revoke outcomes, confirmed destroy, credential precedence, independent authentication lifetimes and cancellation. Native authentication verifies signed fixture tokens against local signing-key and HTTP fixtures; upstream error bodies must not enter diagnostics. |
 | Direct resource tests (`resources_test.go`) | Focused reconciliation tests with injected control-client results, including import restrictions, missing objects and partial failures. |
 
 CLI tests use `resource.UnitTest`, so they run without live-acceptance opt-in. They require the pinned Terraform on `PATH` and fail rather than download another version. Run them through mise, which supplies the actual executable rather than a tool shim. Each case uses a temporary CLI configuration and fake credentials. The in-process provider's transport only permits local fixture routing. Tests run serially because they replace the process-default transport and environment. This setup tests separate provider session ownership directly, not Terraform provider aliases or binary installation.
 
 The shared service fixture models inventory and HTTP faults, not Terraform plans or state. Unexpected endpoints, malformed requests, handler panics and unused fault injections fail tests independently of provider diagnostics. Default tests clear `TF_ACC`: plugin-testing treats any nonempty value, including `0`, as opt-in.
 
-Run just the CLI layer with `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1 -v`. These tests still require the coordinated SDK checkout and its guest. They establish neither live permissions nor live keyset/grant lifecycle behavior, and do not resolve clean-checkout SDK acquisition or licensing.
+Run just the CLI layer with `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1 -v`. These tests need only this checkout and the pinned tools. They establish neither live permissions nor live keyset/grant lifecycle behavior, and do not resolve licensing.
 
 Separate live checks verified that client creation without a specified keyset grants the default keyset, and that deleted clients disappear from inventory. Unique actor names returning 409 remain a fixture assumption, not recorded live proof. Removing a client from the fixture makes its grants unobservable; this does not prove deletion of grant records on the service. Real Admin and Control re-grant probes returned 500 with the default grant unchanged.
 
@@ -180,6 +179,6 @@ There is no default acceptance workspace. The task refuses to run without opt-in
 
 ## Distribution and licensing
 
-Public source visibility does not grant a provider license, and this repository does not assert one. The SDK's Go code and embedded auth guest have different terms. The guest includes Rust code under PolyForm Internal Use 1.0.0; an MIT license on Go source does not authorize redistribution of that binary.
+Public source visibility does not grant a provider license, and this repository does not assert one. The provider no longer embeds the external SDK's WebAssembly authentication guest. This change does not establish licensing or redistribution rights for the provider or its dependencies.
 
-A release needs an installable SDK version that includes the guest, explicit provider licensing, and resolved guest redistribution rights. Do not publish provider binaries or Terraform Registry artifacts based on this repository's visibility.
+Release automation, signing and publication are outside this development build workflow. Do not publish provider binaries or Terraform Registry artifacts based on this repository's visibility.

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"log"
 
@@ -14,23 +13,18 @@ func main() {
 	debug := flag.Bool("debug", false, "serve with debugger reattachment")
 	flag.Parse()
 	p := provider.New()
+	defer p.Close()
+
 	var opts []tf6server.ServeOpt
 	if *debug {
 		opts = append(opts, tf6server.WithManagedDebug())
 	}
 
-	err := func() (err error) {
-		defer func() {
-			if closeErr := p.Close(); closeErr != nil {
-				err = errors.Join(err, errors.New("could not close SDK authentication"))
-			}
-		}()
-
-		return tf6server.Serve("terraform.local/cipherstash/cipherstash", func() tfprotov6.ProviderServer {
-			return provider.Protocol6(p)
-		}, opts...)
-	}()
+	err := tf6server.Serve("terraform.local/cipherstash/cipherstash", func() tfprotov6.ProviderServer {
+		return provider.Protocol6(p)
+	}, opts...)
 	if err != nil {
+		p.Close()
 		log.Fatal(err)
 	}
 }

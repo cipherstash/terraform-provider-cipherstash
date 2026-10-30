@@ -17,7 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 )
 
 // actorResource is the machine identity resource. It is an actor rather than
@@ -129,7 +129,7 @@ func (r *actorResource) Create(ctx context.Context, req resource.CreateRequest, 
 		expiry = &v
 	}
 
-	created, err := r.client.CreateActor(ctx, control.CreateActorOptions{Name: plan.Name.ValueString(), Kind: plan.Kind.ValueString(), Role: plan.Role.ValueString(), TokenExpiry: expiry})
+	created, err := r.client.CreateActor(ctx, control.CreateActorOptions{Name: plan.Name.ValueString(), Kind: control.ActorKind(plan.Kind.ValueString()), Role: control.Role(plan.Role.ValueString()), TokenExpiry: expiry})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot create actor", operationError(err))
 		return
@@ -196,8 +196,8 @@ func (r *actorResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	}
 
 	state.Name = types.StringValue(actor.Name)
-	state.Kind = types.StringValue(actor.Kind)
-	state.Role = types.StringValue(key.Role)
+	state.Kind = types.StringValue(string(actor.Kind))
+	state.Role = types.StringValue(string(key.Role))
 	state.KeyID = types.StringValue(key.ID)
 	state.CreatedAt = types.StringValue(actor.CreatedAt)
 	// access_key and token_expiry are not readable; keep whatever state has.

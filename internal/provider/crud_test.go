@@ -2,7 +2,8 @@ package provider
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,14 +12,18 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/cipherstash/stack/languages/golang/auth"
-	"github.com/cipherstash/stack/languages/golang/control"
+	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/auth"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/lestrrat-go/jwx/v3/jwa"
+	"github.com/lestrrat-go/jwx/v3/jwk"
+	"github.com/lestrrat-go/jwx/v3/jws"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,20 +37,35 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// Exercise the real auth guest and SDK against fixture tokens and an
+// Exercise native authentication and management against signed tokens and an
 // httptest service. Requests cannot escape to a real CipherStash endpoint.
-func fixtureTransport(t *testing.T, role string, handler http.HandlerFunc) http.RoundTripper {
+func fixtureTransport(t *testing.T, role string, handler http.HandlerFunc, changeClaims ...func(map[string]any)) http.RoundTripper {
 	t.Helper()
-	claims, err := json.Marshal(map[string]any{
+	claims := map[string]any{
 		"iss": testIssuer, "sub": "provider-test", "workspace": "ZVATKW3VHMFG27DY",
 		"iat": 1704067200, "exp": 4102444800, // Fixed 2024–2100 validity keeps seeded fixtures deterministic.
 		"aud": "ap-southeast-2.aws.viturhosted.net", "role_set": role, "scope": []string{"read"},
 		"services": map[string]string{"zerokms": "https://ap-southeast-2.aws.viturhosted.net/"},
-	})
+	}
+	for _, change := range changeClaims {
+		change(claims)
+	}
+
+	payload, err := json.Marshal(claims)
 	require.NoError(t, err)
-	// stack-auth reads the exchanged token; signatures and permission checks
-	// belong to the services, so this fixture deliberately has no valid signature.
-	token := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`)) + "." + base64.RawURLEncoding.EncodeToString(claims) + "." + base64.RawURLEncoding.EncodeToString([]byte("fixture-signature"))
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	key, err := jwk.Import(private)
+	require.NoError(t, err)
+	require.NoError(t, key.Set(jwk.KeyIDKey, "provider-test"))
+	require.NoError(t, key.Set(jwk.AlgorithmKey, jwa.RS256()))
+	public, err := jwk.PublicKeyOf(key)
+	require.NoError(t, err)
+	keys := jwk.NewSet()
+	require.NoError(t, keys.AddKey(public))
+	signed, err := jws.Sign(payload, jws.WithKey(jwa.RS256(), key))
+	require.NoError(t, err)
+	token := string(signed)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// net/http otherwise recovers a fixture panic as an ordinary connection
 		// failure, which could accidentally satisfy an expected-error assertion.
@@ -58,6 +78,8 @@ func fixtureTransport(t *testing.T, role string, handler http.HandlerFunc) http.
 
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case "/.well-known/jwks.json":
+			assert.NoError(t, json.NewEncoder(w).Encode(keys))
 		case "/api/authorise":
 			assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{"accessToken": token, "expiry": 4102444800}))
 		default:
@@ -86,7 +108,7 @@ func fixtureTransport(t *testing.T, role string, handler http.HandlerFunc) http.
 
 func configureFixture(t *testing.T, p *Provider, rt http.RoundTripper, cfg providerModel) frameworkprovider.ConfigureResponse {
 	t.Helper()
-	// Production Configure uses the SDK's default transport. Override only the
+	// Production Configure uses the native clients' default transport. Override only the
 	// test process transport, not the provider's public configuration surface.
 	previous := http.DefaultTransport
 	http.DefaultTransport = rt
@@ -96,24 +118,23 @@ func configureFixture(t *testing.T, p *Provider, rt http.RoundTripper, cfg provi
 	state := tfsdk.State{Schema: schema.Schema}
 	noErrors(t, state.Set(context.Background(), cfg))
 	var resp frameworkprovider.ConfigureResponse
-	p.Configure(context.Background(), frameworkprovider.ConfigureRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: state.Raw}}, &resp)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	p.Configure(ctx, frameworkprovider.ConfigureRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: state.Raw}}, &resp)
 
 	return resp
 }
 
 func fixtureClient(t *testing.T, rt http.RoundTripper) *control.Client {
 	t.Helper()
-	store, err := auth.OpenWithoutProfile(context.Background(), auth.WithRoundTripper(rt))
+	crn, err := auth.ParseCRN(testCRN)
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		assert.NoError(t, store.Close(), "could not close SDK authentication store")
-	})
-	strategy, err := store.AccessKey(context.Background(), testCRN, auth.NewAccessKey([]byte("CSAKtestKeyId.testKeySecret")), auth.WithAcceptedRoles("Admin"))
+	key, err := auth.ParseAdminAccessKey("CSAKtestKeyId.testKeySecret")
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		assert.NoError(t, strategy.Close(), "could not close SDK authentication strategy")
-	})
-	client, err := control.NewClient(context.Background(), testCRN, control.WithCTSAuth(strategy), control.WithZeroKMSAuth(strategy), control.WithTransport(rt))
+	tokens, err := auth.NewTokenSource(t.Context(), crn, key, auth.WithTransport(rt))
+	require.NoError(t, err)
+	client, err := control.NewClient(crn, tokens, control.WithTransport(rt))
 	require.NoError(t, err)
 
 	return client
@@ -129,12 +150,13 @@ func TestActorCreateSavesSecretBeforeMetadataRead(t *testing.T) {
 					var input control.CreateActorOptions
 					assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 					assert.Equal(t, "test-create", input.Name)
-					assert.Equal(t, "agent", input.Kind)
-					assert.Equal(t, "control", input.Role)
+					assert.Equal(t, control.ActorKind("agent"), input.Kind)
+					assert.Equal(t, control.Role("control"), input.Role)
 					if assert.NotNil(t, input.TokenExpiry) {
 						assert.Equal(t, int64(1234), *input.TokenExpiry)
 					}
 
+					w.WriteHeader(http.StatusCreated)
 					_, err := fmt.Fprint(w, `{"actorId":"agent-created","name":"test-create","kind":"agent","role":"control","accessKey":"CSAKcreated.secret"}`)
 					assert.NoError(t, err)
 				case "/api/access-keys":
@@ -204,50 +226,48 @@ func TestClientCreatePreservesEncodedSecret(t *testing.T) {
 	require.Equal(t, "AQIDBA==", state.ClientKey.ValueString())
 }
 
-func TestProviderOwnsSessionAcrossCallsAndClosesOnReconfigureAndStop(t *testing.T) {
+func TestProviderOwnsAuthenticationAcrossCallsAndCancelsOnReconfigureAndStop(t *testing.T) {
 	rt := fixtureTransport(t, "admin", func(w http.ResponseWriter, req *http.Request) {
 		_, err := fmt.Fprint(w, `[]`)
 		assert.NoError(t, err)
+	}, func(claims map[string]any) {
+		claims["exp"] = time.Now().Add(30 * time.Second).Unix()
 	})
 	t.Setenv("CIPHERSTASH_ACCESS_KEY", "CSAKtestKeyId.testKeySecret")
 	p := New()
-	t.Cleanup(func() {
-		assert.NoError(t, p.Close(), "could not close SDK authentication")
-	})
+	t.Cleanup(p.Close)
 	cfg := providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringNull()}
 	configured := configureFixture(t, p, rt, cfg)
 	noErrors(t, configured.Diagnostics)
-	oldStrategy, oldStore := p.strategy, p.store
-	_, err := oldStrategy.Token(context.Background())
-	require.NoError(t, err, "Configure released session too early")
+	api, err := clientFromProviderData(configured.ResourceData)
+	require.NoError(t, err)
+	_, err = api.ListClients(t.Context(), control.ListClientsOptions{})
+	require.NoError(t, err, "Configure released authentication too early")
 	configured = configureFixture(t, p, rt, cfg)
 	noErrors(t, configured.Diagnostics)
-	_, err = oldStrategy.Token(context.Background())
-	require.ErrorIs(t, err, auth.ErrState, "reconfiguration did not close old session")
-	require.NoError(t, oldStore.Close())
-	current := p.strategy
+	_, err = api.ListClients(t.Context(), control.ListClientsOptions{})
+	require.ErrorIs(t, err, context.Canceled, "reconfiguration did not cancel old authentication")
+	api, err = clientFromProviderData(configured.ResourceData)
+	require.NoError(t, err)
 	_, err = Protocol6(p).StopProvider(context.Background(), &tfprotov6.StopProviderRequest{})
 	require.NoError(t, err)
-	_, err = current.Token(context.Background())
-	require.ErrorIs(t, err, auth.ErrState, "StopProvider did not close session")
+	_, err = api.ListClients(t.Context(), control.ListClientsOptions{})
+	require.ErrorIs(t, err, context.Canceled, "StopProvider did not cancel authentication")
 }
 
-func TestProviderRejectsWrongDecodedRole(t *testing.T) {
+func TestProviderRejectsWrongVerifiedRole(t *testing.T) {
 	for _, role := range []string{"member", "control", ""} {
 		t.Run(role, func(t *testing.T) {
 			rt := fixtureTransport(t, role, func(w http.ResponseWriter, req *http.Request) {
 				assert.Fail(t, "wrong-role credential reached management API")
 			})
 			p := New()
-			t.Cleanup(func() {
-				assert.NoError(t, p.Close(), "could not close SDK authentication")
-			})
+			t.Cleanup(p.Close)
 			configured := configureFixture(t, p, rt, providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")})
 			require.True(t, configured.Diagnostics.HasError(), "%v", configured.Diagnostics)
 			require.Nil(t, configured.ResourceData)
 			require.Nil(t, configured.DataSourceData)
-			require.Nil(t, p.strategy)
-			require.Nil(t, p.store)
+			require.Nil(t, p.cancel)
 		})
 	}
 }
@@ -260,9 +280,7 @@ func TestProviderDefersAuthorizationToServices(t *testing.T) {
 				http.Error(w, "denied: test-secret-not-a-credential", status)
 			})
 			p := New()
-			t.Cleanup(func() {
-				assert.NoError(t, p.Close(), "could not close SDK authentication")
-			})
+			t.Cleanup(p.Close)
 			configured := configureFixture(t, p, rt, providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")})
 			noErrors(t, configured.Diagnostics)
 			api, err := clientFromProviderData(configured.ResourceData)
@@ -301,7 +319,7 @@ func TestKeysetGrantSDKCRUDPreservesOtherGrants(t *testing.T) {
 		switch req.URL.Path {
 		case "/list-clients":
 			assert.NoError(t, json.NewEncoder(w).Encode([]map[string]any{
-				{"id": "44444444-4444-4444-8444-444444444444", "keyset_id": []string{keysetID}},
+				{"id": "44444444-4444-4444-8444-444444444444", "name": "other", "keyset_id": []string{keysetID}},
 				{"id": clientID, "name": "existing", "keyset_id": grants},
 			}))
 		case "/grant-keyset", "/revoke-keyset":
@@ -368,13 +386,13 @@ func TestKeysetSDKCRUDDisablesAndRetains(t *testing.T) {
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 			assert.Nil(t, input.Client, "keyset resource must not create a client")
 			remote = &control.Keyset{ID: keysetID, Name: input.Name, Description: input.Description}
-			assert.NoError(t, json.NewEncoder(w).Encode(remote))
+			assert.NoError(t, json.NewEncoder(w).Encode(keysetJSON(*remote)))
 		case "/list-keysets":
 			var input control.ListKeysetsOptions
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
-			keysets := []control.Keyset{unrelated}
+			keysets := []map[string]any{keysetJSON(unrelated)}
 			if remote != nil && (input.ShowDisabled || !remote.IsDisabled) {
-				keysets = append(keysets, *remote)
+				keysets = append(keysets, keysetJSON(*remote))
 			}
 
 			assert.NoError(t, json.NewEncoder(w).Encode(keysets))

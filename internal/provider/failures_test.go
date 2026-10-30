@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -149,7 +149,7 @@ func TestSDKGrantUncertainWrites(t *testing.T) {
 			for _, readFailed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("revoke=%t/applied=%t/readFailed=%t", revoke, applied, readFailed), func(t *testing.T) {
 					f := newServiceFixture(t)
-					f.clients = []control.EncryptionClient{{ID: clientID, KeysetIDs: []string{keysetID}}}
+					f.clients = []control.EncryptionClient{{ID: clientID, Name: "existing", KeysetIDs: []string{keysetID}}}
 					endpoint := "/grant-keyset"
 					if revoke {
 						endpoint = "/revoke-keyset"

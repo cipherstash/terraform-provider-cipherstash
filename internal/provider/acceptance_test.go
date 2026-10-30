@@ -9,14 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,9 +30,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 	workspace := os.Getenv("TF_ACC_WORKSPACE_ID")
 	require.True(t, workspace != "" && crn != "" && strings.HasSuffix(crn, ":"+workspace) && os.Getenv("CIPHERSTASH_ACCESS_KEY") != "", "set TF_ACC_WORKSPACE_ID, a matching TF_ACC_CRN and CIPHERSTASH_ACCESS_KEY for the explicitly approved acceptance workspace")
 	p := New()
-	t.Cleanup(func() {
-		assert.True(t, p.Close() == nil, "could not close SDK authentication")
-	})
+	t.Cleanup(p.Close)
 	var schema frameworkprovider.SchemaResponse
 	p.Schema(context.Background(), frameworkprovider.SchemaRequest{}, &schema)
 	config := tfsdk.State{Schema: schema.Schema}
@@ -150,9 +147,7 @@ data "cipherstash_client" "test" {
 		ProtoV6ProviderFactories: map[string]func() (tfprotov6.ProviderServer, error){
 			"cipherstash": func() (tfprotov6.ProviderServer, error) {
 				provider := New()
-				t.Cleanup(func() {
-					assert.True(t, provider.Close() == nil, "could not close SDK authentication")
-				})
+				t.Cleanup(provider.Close)
 
 				return Protocol6(provider), nil
 			},

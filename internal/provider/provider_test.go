@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cipherstash/stack/languages/golang/control"
+	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -33,9 +33,7 @@ func TestConfigureRejectsUnknownAndEmptyInputs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := New()
-			t.Cleanup(func() {
-				assert.NoError(t, p.Close(), "could not close SDK authentication")
-			})
+			t.Cleanup(p.Close)
 			var schema provider.SchemaResponse
 			p.Schema(context.Background(), provider.SchemaRequest{}, &schema)
 			state := tfsdk.State{Schema: schema.Schema}
@@ -70,7 +68,7 @@ func TestProtocolSchemaAndStop(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	require.NoError(t, p.Close())
+	p.Close()
 }
 
 func TestProviderCredentialPrecedence(t *testing.T) {
@@ -114,9 +112,7 @@ func TestProviderCredentialPrecedence(t *testing.T) {
 				return base.RoundTrip(req)
 			})
 			p := New()
-			t.Cleanup(func() {
-				assert.NoError(t, p.Close())
-			})
+			t.Cleanup(p.Close)
 			configured := configureFixture(t, p, rt, providerModel{CRN: types.StringValue(testCRN), AccessKey: key})
 			noErrors(t, configured.Diagnostics)
 			select {
@@ -129,17 +125,17 @@ func TestProviderCredentialPrecedence(t *testing.T) {
 	}
 }
 
-func TestProviderInstancesKeepSeparateSessions(t *testing.T) {
+func TestProviderInstancesKeepSeparateAuthentication(t *testing.T) {
 	f := newServiceFixture(t)
 	f.clients = []control.EncryptionClient{{ID: clientID, Name: "application"}}
-	rt := fixtureTransport(t, "admin", f.ServeHTTP)
-	// Two instances in the same workspace must not share session ownership.
+	rt := fixtureTransport(t, "admin", f.ServeHTTP, func(claims map[string]any) {
+		claims["exp"] = time.Now().Add(30 * time.Second).Unix()
+	})
+	// Short-lived tokens force refresh to exercise each owner's lifetime.
 	// They share the process-default HTTP transport, as they do in production.
 	left, right := New(), New()
 	for _, p := range []*Provider{left, right} {
-		t.Cleanup(func() {
-			assert.NoError(t, p.Close())
-		})
+		t.Cleanup(p.Close)
 	}
 
 	cfg := providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")}
@@ -161,7 +157,7 @@ func TestProviderInstancesKeepSeparateSessions(t *testing.T) {
 	closed, err := clientFromProviderData(l.ResourceData)
 	require.NoError(t, err)
 	_, err = closed.ListClients(context.Background(), control.ListClientsOptions{})
-	require.ErrorIs(t, err, control.ErrAuthentication, "stopped provider still has a usable session")
+	require.ErrorIs(t, err, context.Canceled, "stopped provider still refreshes tokens")
 	api, err := clientFromProviderData(r.ResourceData)
 	require.NoError(t, err)
 	clients, err := api.ListClients(context.Background(), control.ListClientsOptions{})
@@ -185,9 +181,7 @@ func TestProviderReadCancellationRetainsState(t *testing.T) {
 		return nil, req.Context().Err()
 	})
 	p := New()
-	t.Cleanup(func() {
-		assert.NoError(t, p.Close())
-	})
+	t.Cleanup(p.Close)
 	configured := configureFixture(t, p, rt, providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")})
 	noErrors(t, configured.Diagnostics)
 	api, err := clientFromProviderData(configured.ResourceData)

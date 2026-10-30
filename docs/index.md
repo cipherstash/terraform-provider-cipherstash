@@ -3,7 +3,7 @@
 page_title: "cipherstash Provider"
 description: |-
   Use the CipherStash provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a workspace. Configure a separate provider instance for each workspace. See the workspace documentation https://cipherstash.com/docs/reference/workspace for the CipherStash concepts.
-  This provider is in development and is not published to the Terraform Registry. Local builds require a coordinated CipherStash Go SDK checkout. SDK distribution and provider licensing remain unresolved.
+  This provider is in development and is not published to the Terraform Registry. Local builds use the native Go authentication and management packages in this repository; no separate SDK checkout or WebAssembly guest is required. Provider licensing remains unresolved.
   Authenticate with an access key that has the Admin role. Create this credential outside the Terraform configuration that uses it. Resource access keys and client key values are stored in Terraform state and saved plans, even when marked sensitive. Protect these files and your state backend.
 ---
 
@@ -11,7 +11,7 @@ description: |-
 
 Use the CipherStash provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a workspace. Configure a separate provider instance for each workspace. See the [workspace documentation](https://cipherstash.com/docs/reference/workspace) for the CipherStash concepts.
 
-This provider is in development and is not published to the Terraform Registry. Local builds require a coordinated CipherStash Go SDK checkout. SDK distribution and provider licensing remain unresolved.
+This provider is in development and is not published to the Terraform Registry. Local builds use the native Go authentication and management packages in this repository; no separate SDK checkout or WebAssembly guest is required. Provider licensing remains unresolved.
 
 Authenticate with an access key that has the Admin role. Create this credential outside the Terraform configuration that uses it. Resource access keys and client key values are stored in Terraform state and saved plans, even when marked sensitive. Protect these files and your state backend.
 
@@ -26,4 +26,4 @@ Authenticate with an access key that has the Admin role. Create this credential 
 
 ### Optional
 
-- `access_key` (String, Sensitive) Access key with the Admin role for this workspace. Omit this argument or set it to null to use `CIPHERSTASH_ACCESS_KEY`. Empty strings and values that are unknown during provider configuration are rejected. The SDK checks the role in the decoded token as a configuration guard; this is not signature verification or authorization. CipherStash services authorize each request.
+- `access_key` (String, Sensitive) Access key with the Admin role for this workspace. Omit this argument or set it to null to use `CIPHERSTASH_ACCESS_KEY`. Empty strings and values that are unknown during provider configuration are rejected. Native authentication verifies the token's signature, issuer, audience, expiry, workspace and Admin role before using it. CipherStash services authorize each request.
