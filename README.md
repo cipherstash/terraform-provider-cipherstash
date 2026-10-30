@@ -47,7 +47,7 @@ Use an encrypted state backend with restricted access. Protect backups and saved
 | Resource or data source | What it manages | Change behavior |
 | --- | --- | --- |
 | [`cipherstash_actor`](docs/resources/actor.md) | A machine identity and its access key | Any argument change replaces the actor and creates a new key. |
-| [`cipherstash_client`](docs/resources/client.md) | A ZeroKMS client and its client key | Any argument change replaces the client. Existing grants are not transferred to the replacement. |
+| [`cipherstash_client`](docs/resources/client.md) | A ZeroKMS client and its client key | Name/description changes replace the client; grants are not transferred. UUID-bound key seeding only updates Terraform state. |
 | [`cipherstash_keyset`](docs/resources/keyset.md) | A keyset's name, description, and enabled status | Updates the existing keyset. Destroy disables it; it does not delete key material. |
 | [`cipherstash_keyset_grant`](docs/resources/keyset_grant.md) | One client/keyset grant | Changing either ID replaces the grant. Destroy revokes only that pair. |
 | [`cipherstash_client` data source](docs/data-sources/client.md) | Read-only client metadata | Does not import, change, or delete the client or its grants. |
@@ -80,7 +80,7 @@ The lookup returns the client's `name`, `description`, and all granted `keyset_i
 
 ### Replace an actor or client
 
-Changing any actor or client argument requires replacement and creates a new credential. An actor's `token_expiry` sets the lifetime of tokens issued from its access key, not the lifetime of the key itself. If omitted, CTS uses 900 seconds. The API does not return this setting, so Terraform cannot detect changes made outside Terraform.
+Changing any actor argument, or a client's name or description, requires replacement and creates a new credential. Client metadata updates are not supported by the published ZeroKMS API. An actor's `token_expiry` sets the lifetime of tokens issued from its access key, not the lifetime of the key itself. If omitted, CTS uses 900 seconds. The API does not return this setting, so Terraform cannot detect changes made outside Terraform.
 
 Actor and client deletion accept a successful service response or an already-absent response; the provider does not then check inventory. Separate live checks observed removal from inventory, but that is not proof of immediate credential revocation. In a disposable development workspace, a deleted actor's key still succeeded in a new token exchange after the actor and its key disappeared from listings. The revocation delay is unknown. Before a security-sensitive credential change, verify when the old credential and already-issued tokens stop working.
 
@@ -98,6 +98,34 @@ Import brings an existing object under Terraform management; it does not recover
 The example IDs are placeholders. To keep an imported actor or client, use its previously saved credential from your secret store. To obtain a new credential, replace the resource and plan the change for its consumers.
 
 Existing development state needs no manual editing or schema upgrade: the client ID, client key and computed string `keyset_id` retain their representation and saved values. Old UUID-only imports that previously selected one grant keep that historical value; new UUID-only imports do not select a grant. A legacy pair import validates both UUIDs and the client's existence, but does not validate the keyset or grant. Import the pair separately as a `cipherstash_keyset_grant` if Terraform should own that permission.
+
+### Record an existing client key after import
+
+Import first without seed arguments. To record a key you already hold, subsequently configure both `client_key` and `client_key_client_id`, then review and apply the state-only update:
+
+```hcl
+variable "existing_client_key" {
+  type      = string
+  sensitive = true
+}
+
+resource "cipherstash_client" "api" {
+  name                 = "existing-name"
+  description          = "existing-description"
+  client_key_client_id = "11111111-1111-4111-8111-111111111111" # The UUID you imported.
+  client_key           = var.existing_client_key
+}
+```
+
+Supply the secret through your protected variable mechanism, not an import ID or committed file. The key must be a generated v1 CBOR permutation keyset encoded as standard base64 or mixed-case hex, without whitespace. The supplied string is preserved exactly, not normalized. This is not a raw 32-byte key: [recipher 0.3.1](https://docs.rs/crate/recipher/0.3.1/source/src/keyset/proxy_keyset.rs) serializes four named fields (`p1`, `p2_from`, `p2_to`, `p3`), each containing a `permutation` integer array. Validation requires permutations of 0–15 for the first three and 0–32 for the last, and rejects duplicate fields and trailing data. Field order and total encoded length are not fixed; unknown fields are ignored. This supports the generated named-map format, not every alternate representation accepted by Rust's permissive deserializer.
+
+Both inputs must be known during planning, and the explicit UUID must match the managed client. Do not derive the expected UUID from this resource's own `id`: that would defeat the protection against reusing configuration for another import. This check verifies the operator's declared pairing, not cryptographic ownership. Verify key/client correspondence separately with your application; refresh performs no encryption or decryption.
+
+Seeding does not write to CipherStash, rotate a credential, change metadata or manage grants. An already-persisted key can only be retained, not replaced by another supplied value. Refresh, removing the seed arguments and setting them to null retain the stored key. Removing `client_key_client_id` may itself produce a state-only update. A missing remote client or failed inventory read prevents adoption, including when applying a previously saved adoption plan. A null key is not proof of import provenance: failed creation-secret export can also leave one.
+
+Creation and replacement are rejected during planning while either seed argument is configured, including taint and `-replace` with either replacement order. For intentional replacement, remove both seed arguments and review the resulting credential/grant changes. The new client receives its own new key, never the seed. These checks do not prevent intentional destroy; use `prevent_destroy` when appropriate.
+
+Terraform's `ignore_changes` has its normal semantics. An ignored key change retains the stored value instead of adopting or rejecting the ignored input. Ignoring a null imported key will not seed it. UUID assertions are checked against Terraform's effective configuration too; do not ignore a UUID change if you intend the provider to evaluate it. Keys remain in state and saved plans despite sensitive marking.
 
 ### Disable or stop managing a keyset
 

@@ -216,8 +216,9 @@ func TestClientCreatePreservesEncodedSecret(t *testing.T) {
 	})
 	r := &clientResource{client: fixtureClient(t, rt)}
 	plan := resourceState(t, r, clientModel{Name: types.StringValue("test-client"), Description: types.StringValue("create test"), ID: types.StringUnknown(), KeysetID: types.StringUnknown(), ClientKey: types.StringUnknown()})
+	config := resourceState(t, r, clientModel{Name: types.StringValue("test-client"), Description: types.StringValue("create test")})
 	resp := resource.CreateResponse{State: resourceState(t, r, clientModel{})}
-	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(plan)}, &resp)
+	r.Create(context.Background(), resource.CreateRequest{Config: tfsdk.Config(config), Plan: tfsdk.Plan(plan)}, &resp)
 	noErrors(t, resp.Diagnostics)
 	var state clientModel
 	noErrors(t, resp.State.Get(context.Background(), &state))
