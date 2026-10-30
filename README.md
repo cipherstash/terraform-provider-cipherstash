@@ -143,7 +143,7 @@ A failed apply does not mean nothing was created. The provider saves returned ID
 
 If a create request succeeds but its response is lost, the provider may never receive the new object's ID. Writes are not automatically retried. Inspect inventory and import an existing object before retrying a conflicting create.
 
-Refresh removes absent resources from state only after a successful lookup. Authentication or listing errors are not evidence of absence. An actor with missing or ambiguous access-key metadata stays in state with an error. Existing creation secrets are retained during refresh.
+Refresh removes absent resources from state only after a successful lookup. Authentication or listing errors are not evidence of absence. Client and keyset inventories with invalid UUIDs or repeated identity fields, or client entries with missing/null descriptions, fail refresh without changing saved state. An empty description and an empty grant array remain valid. An actor with missing or ambiguous access-key metadata stays in state with an error. Existing creation secrets are retained during refresh.
 
 A grant's ID is known before the request because it is the client/keyset pair. After attempting creation, the provider saves that pair before reading it back. A failed write remains an error, and the pair stays in state unless a follow-up read confirms it is absent. A failed revoke counts as complete only if a follow-up read confirms absence; Terraform reports a warning about the failed request. No write is retried automatically.
 

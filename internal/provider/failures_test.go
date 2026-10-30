@@ -3,7 +3,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
@@ -54,6 +56,70 @@ func TestSDKReadFailureIsNotAbsence(t *testing.T) {
 				f.edit(func() {
 					require.Empty(t, f.mutations, "refresh mutated inventory")
 				})
+			})
+		}
+	}
+}
+
+func TestMalformedInventoryPreservesState(t *testing.T) {
+	for _, kind := range []string{"client", "keyset", "grant"} {
+		for _, malformed := range []string{"invalid UUID", "duplicate ID", "escaped duplicate ID", "case duplicate ID", "missing description", "null description", "invalid grant UUID", "duplicate grants"} {
+			if kind == "keyset" && (malformed == "invalid grant UUID" || malformed == "duplicate grants") {
+				continue
+			}
+
+			t.Run(kind+"/"+malformed, func(t *testing.T) {
+				id := clientID
+				endpoint := "/list-clients"
+				if kind == "keyset" {
+					id, endpoint = keysetID, "/list-keysets"
+				}
+
+				body := fmt.Sprintf(`[{"id":%q,"name":"application","description":"owned","keyset_id":[%q],"is_disabled":false}]`, id, keysetID)
+				switch malformed {
+				case "invalid UUID":
+					body = strings.Replace(body, id, "fixture-upstream-secret", 1)
+				case "duplicate ID", "escaped duplicate ID", "case duplicate ID":
+					field := "id"
+					switch malformed {
+					case "escaped duplicate ID":
+						field = `\u0069d`
+					case "case duplicate ID":
+						field = "ID"
+					}
+
+					body = strings.Replace(body, `"id":`, fmt.Sprintf(`"%s":%q,"id":`, field, tenantKeysetID), 1)
+				case "missing description":
+					body = strings.Replace(body, `,"description":"owned"`, "", 1)
+				case "null description":
+					body = strings.Replace(body, `"description":"owned"`, `"description":null`, 1)
+				case "invalid grant UUID":
+					body = strings.Replace(body, keysetID, "fixture-upstream-secret", 1)
+				case "duplicate grants":
+					body = strings.Replace(body, `"keyset_id":`, `"keyset_id":[],"keyset_id":`, 1)
+				}
+
+				client := fixtureClient(t, fixtureTransport(t, "admin", func(w http.ResponseWriter, req *http.Request) {
+					assert.Equal(t, endpoint, req.URL.Path, "refresh must only read inventory")
+					_, _ = fmt.Fprint(w, body)
+				}))
+				var r resource.Resource
+				var model any
+				switch kind {
+				case "client":
+					r, model = &clientResource{client: client}, savedClient()
+				case "keyset":
+					r, model = &keysetResource{client: client}, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("application"), Description: types.StringValue("owned"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)}
+				case "grant":
+					r, model = &keysetGrantResource{client: client}, keysetGrantModel{ID: types.StringValue(clientID + "/" + keysetID), ClientID: types.StringValue(clientID), KeysetID: types.StringValue(keysetID)}
+				}
+
+				before := resourceState(t, r, model)
+				resp := resource.ReadResponse{State: before}
+				r.Read(t.Context(), resource.ReadRequest{State: before}, &resp)
+				require.True(t, resp.Diagnostics.HasError(), "malformed inventory must fail refresh")
+				require.True(t, resp.State.Raw.Equal(before.Raw), "malformed inventory changed persisted identity, metadata or secret")
+				require.NotContains(t, fmt.Sprint(resp.Diagnostics), "fixture-upstream-secret")
 			})
 		}
 	}

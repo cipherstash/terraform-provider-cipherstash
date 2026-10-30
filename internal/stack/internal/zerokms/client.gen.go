@@ -214,7 +214,7 @@ type Keyset struct {
 // KeysetClient Response type for a [ListClientRequest].
 type KeysetClient struct {
 	CreatedBy   *string `json:"created_by,omitempty"`
-	Description string  `json:"description"`
+	Description *string `json:"description"`
 	ID          string  `json:"id"`
 
 	// KeysetID Struct representing the keyset ids associated with a client

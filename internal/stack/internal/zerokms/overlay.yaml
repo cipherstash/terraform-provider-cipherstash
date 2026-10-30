@@ -7,6 +7,10 @@ actions:
     description: Distinguish missing or null from a valid empty description.
     update:
       x-go-type: '*string'
+  - target: '$.components.schemas.KeysetClient.properties.description'
+    description: Reject incomplete inventory instead of refreshing metadata to an empty string.
+    update:
+      x-go-type: '*string'
   - target: '$.components.schemas.Keyset.properties.description'
     description: Distinguish missing or null from a valid empty description.
     update:

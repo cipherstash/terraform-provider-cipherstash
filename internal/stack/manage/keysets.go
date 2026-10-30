@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/zerokms"
+	"github.com/hashicorp/go-uuid"
 )
 
 // Keyset describes a ZeroKMS keyset without exposing key material.
@@ -82,7 +83,11 @@ func (c *Client) ListKeysets(ctx context.Context, opts ListKeysetsOptions) ([]Ke
 
 	keysets := make([]Keyset, 0, len(*resp.JSON200))
 	for _, keyset := range *resp.JSON200 {
-		if keyset.ID == "" || keyset.Name == "" || keyset.Description == nil || keyset.IsDisabled == nil {
+		if _, err := uuid.ParseUUID(keyset.ID); err != nil {
+			return nil, fmt.Errorf("%w: invalid keyset UUID", ErrResponse)
+		}
+
+		if keyset.Name == "" || keyset.Description == nil || keyset.IsDisabled == nil {
 			return nil, fmt.Errorf("%w: incomplete keyset", ErrResponse)
 		}
 
@@ -93,6 +98,9 @@ func (c *Client) ListKeysets(ctx context.Context, opts ListKeysetsOptions) ([]Ke
 			IsDisabled:  *keyset.IsDisabled,
 			IsDefault:   keyset.IsDefault != nil && *keyset.IsDefault,
 		})
+	}
+	if err := checkInventoryDuplicates(resp.Body); err != nil {
+		return nil, err
 	}
 
 	return keysets, nil

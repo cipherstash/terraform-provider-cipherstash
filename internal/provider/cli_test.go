@@ -556,6 +556,55 @@ resource "cipherstash_keyset_grant" "app" {
 	})
 }
 
+func TestCLIMalformedInventoryRecovery(t *testing.T) {
+	f := newServiceFixture(t)
+	tc := cliTestCase(t, f)
+	config := cliProvider + "resource \"cipherstash_client\" \"app\" {\n name = \"app\"\n description = \"application\"\n}"
+	var id, secret string
+	check := func(s *terraform.State) error {
+		client := s.RootModule().Resources["cipherstash_client.app"].Primary
+		if client.ID != id || client.Attributes["client_key"] != secret || client.Attributes["name"] != "app" || client.Attributes["description"] != "application" {
+			return fmt.Errorf("failed refresh changed the client's identity, metadata or secret")
+		}
+
+		f.edit(func() { require.Empty(t, f.mutations, "failed refresh or recovery mutated the service") })
+
+		return nil
+	}
+	tc.Steps = []resource.TestStep{{Config: config, Check: func(s *terraform.State) error {
+		client := s.RootModule().Resources["cipherstash_client.app"].Primary
+		id, secret = client.ID, client.Attributes["client_key"]
+
+		return nil
+	}}}
+	for _, malformed := range []string{"invalid UUID", "duplicate ID", "missing description", "null description"} {
+		tc.Steps = append(tc.Steps, resource.TestStep{
+			PreConfig: func() {
+				body := fmt.Sprintf(`[{"id":%q,"name":"app","description":"application","keyset_id":[%q]}]`, id, keysetID)
+				switch malformed {
+				case "invalid UUID":
+					body = strings.Replace(body, id, "invalid-id", 1)
+				case "duplicate ID":
+					body = strings.Replace(body, `"id":`, fmt.Sprintf(`"id":%q,"id":`, tenantKeysetID), 1)
+				case "missing description":
+					body = strings.Replace(body, `,"description":"application"`, "", 1)
+				case "null description":
+					body = strings.Replace(body, `"description":"application"`, `"description":null`, 1)
+				}
+
+				f.edit(func() {
+					f.mutations = nil
+					f.faults = []serviceFault{{path: "/list-clients", status: 200, body: body}}
+				})
+			}, Config: config, PlanOnly: true, ExpectError: regexp.MustCompile("Cannot read client"),
+		}, resource.TestStep{
+			Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}, Check: check,
+		})
+	}
+
+	resource.UnitTest(t, tc)
+}
+
 func TestCLIValidation(t *testing.T) {
 	for _, expiry := range []int64{1, 86400} {
 		t.Run(fmt.Sprintf("valid token lifetime %d", expiry), func(t *testing.T) {

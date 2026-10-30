@@ -74,6 +74,7 @@ type serviceFault struct {
 	skip       int
 	afterWrite bool
 	status     int
+	body       string
 }
 
 func newServiceFixture(t *testing.T) *serviceFixture {
@@ -147,7 +148,16 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if fault != nil && !fault.afterWrite {
+		if fault.body != "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(fault.status)
+			_, _ = fmt.Fprint(w, fault.body)
+
+			return
+		}
+
 		http.Error(w, "fixture-upstream-secret", fault.status)
+
 		return
 	}
 

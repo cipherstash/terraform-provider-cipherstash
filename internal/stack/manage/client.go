@@ -3,6 +3,7 @@
 package manage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -191,6 +193,55 @@ func routeToZeroKMS(req *http.Request, endpoint *url.URL) {
 	target.RawQuery = req.URL.RawQuery
 	req.URL = &target
 	req.Host = target.Host
+}
+
+// checkInventoryDuplicates checks the already-decoded inventory's wire fields.
+// encoding/json otherwise silently replaces repeated identities, including
+// escaped or case-folded spellings of the same field. Unknown nested fields
+// are skipped, not interpreted as inventory identities.
+func checkInventoryDuplicates(body []byte) error {
+	invalid := fmt.Errorf("%w: ambiguous inventory identity", ErrResponse)
+	var items []json.RawMessage
+	if err := json.Unmarshal(body, &items); err != nil {
+		return invalid
+	}
+
+	for _, item := range items {
+		decoder := json.NewDecoder(bytes.NewReader(item))
+		if _, err := decoder.Token(); err != nil {
+			return invalid
+		}
+
+		seen := map[string]bool{}
+		for decoder.More() {
+			field, err := decoder.Token()
+			if err != nil {
+				return invalid
+			}
+
+			name, ok := field.(string)
+			if !ok {
+				return invalid
+			}
+
+			for _, identity := range []string{"id", "keyset_id"} {
+				if strings.EqualFold(name, identity) {
+					if seen[identity] {
+						return invalid
+					}
+
+					seen[identity] = true
+				}
+			}
+
+			var value json.RawMessage
+			if err := decoder.Decode(&value); err != nil {
+				return invalid
+			}
+		}
+	}
+
+	return nil
 }
 
 // checkResponse classifies a generated client's result. resp is only read

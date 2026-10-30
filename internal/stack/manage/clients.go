@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/zerokms"
+	"github.com/hashicorp/go-uuid"
 )
 
 // EncryptionClient is a ZeroKMS client identity, distinct from the
@@ -105,8 +106,12 @@ func (c *Client) ListClients(ctx context.Context, opts ListClientsOptions) ([]En
 
 	clients := make([]EncryptionClient, 0, len(*resp.JSON200))
 	for _, item := range *resp.JSON200 {
-		if item.ID == "" || item.Name == "" {
-			return nil, fmt.Errorf("%w: client has no ID or name", ErrResponse)
+		if _, err := uuid.ParseUUID(item.ID); err != nil {
+			return nil, fmt.Errorf("%w: invalid client UUID", ErrResponse)
+		}
+
+		if item.Name == "" || item.Description == nil {
+			return nil, fmt.Errorf("%w: incomplete client metadata", ErrResponse)
 		}
 
 		// The service returns one keyset ID or an array of them.
@@ -123,8 +128,17 @@ func (c *Client) ListClients(ctx context.Context, opts ListClientsOptions) ([]En
 		if ids == nil || slices.Contains(ids, "") {
 			return nil, fmt.Errorf("%w: missing client keyset association", ErrResponse)
 		}
+		for _, id := range ids {
+			if _, err := uuid.ParseUUID(id); err != nil {
+				return nil, fmt.Errorf("%w: invalid client keyset UUID", ErrResponse)
+			}
+		}
 
-		clients = append(clients, EncryptionClient{ID: item.ID, Name: item.Name, Description: item.Description, KeysetIDs: ids})
+		clients = append(clients, EncryptionClient{ID: item.ID, Name: item.Name, Description: *item.Description, KeysetIDs: ids})
+	}
+
+	if err := checkInventoryDuplicates(resp.Body); err != nil {
+		return nil, err
 	}
 
 	return clients, nil

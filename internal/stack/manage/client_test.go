@@ -171,7 +171,7 @@ func TestActorAndClientContractsAndOneShotSecrets(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"id":"client-1","name":"app","description":"test","dataset_id":"keyset-1","client_key":"encoded-client-key"}`)
 		case "POST /list-clients":
 			assert.Equal(t, map[string]any{"keyset_id": map[string]any{"Uuid": "keyset-1"}}, decode(t, r))
-			_, _ = fmt.Fprint(w, `[{"id":"one","name":"single","keyset_id":"keyset-1"},{"id":"two","name":"multiple","keyset_id":["keyset-2","keyset-1"]}]`)
+			_, _ = fmt.Fprint(w, `[{"id":"00000000-0000-4000-8000-000000000001","name":"single","description":"","keyset_id":"00000000-0000-4000-8000-000000000011"},{"id":"00000000-0000-4000-8000-000000000002","name":"multiple","description":"","keyset_id":["00000000-0000-4000-8000-000000000012","00000000-0000-4000-8000-000000000011"]}]`)
 		case "POST /delete-client":
 			assert.Equal(t, map[string]any{"client_id": "client-1"}, decode(t, r))
 			_, _ = fmt.Fprint(w, `{}`)
@@ -234,8 +234,8 @@ func TestActorAndClientContractsAndOneShotSecrets(t *testing.T) {
 	listed, err := client.ListClients(ctx, manage.ListClientsOptions{KeysetID: "keyset-1"})
 	require.NoError(t, err)
 	assert.Equal(t, []manage.EncryptionClient{
-		{ID: "one", Name: "single", KeysetIDs: []string{"keyset-1"}},
-		{ID: "two", Name: "multiple", KeysetIDs: []string{"keyset-2", "keyset-1"}},
+		{ID: "00000000-0000-4000-8000-000000000001", Name: "single", KeysetIDs: []string{"00000000-0000-4000-8000-000000000011"}},
+		{ID: "00000000-0000-4000-8000-000000000002", Name: "multiple", KeysetIDs: []string{"00000000-0000-4000-8000-000000000012", "00000000-0000-4000-8000-000000000011"}},
 	}, listed)
 	require.NoError(t, client.DeleteActor(ctx, actor.ID))
 	require.NoError(t, client.DeleteClient(ctx, created.ID))
@@ -327,7 +327,7 @@ func TestKeysetContracts(t *testing.T) {
 		case "/create-keyset":
 			_, _ = fmt.Fprint(w, `{"id":"keyset-1","name":"tenant","description":"tenant keys","is_disabled":false,"client":{"id":"client-2","client_key":"encoded-key"}}`)
 		case "/list-keysets":
-			_, _ = fmt.Fprint(w, `[{"id":"keyset-1","name":"tenant","description":"tenant keys","is_disabled":true,"is_default":false},{"id":"keyset-2","name":"default","description":"","is_disabled":false,"is_default":true}]`)
+			_, _ = fmt.Fprint(w, `[{"id":"00000000-0000-4000-8000-000000000011","name":"tenant","description":"tenant keys","is_disabled":true,"is_default":false},{"id":"00000000-0000-4000-8000-000000000012","name":"default","description":"","is_disabled":false,"is_default":true}]`)
 		default:
 			_, _ = fmt.Fprint(w, `{}`)
 		}
@@ -349,8 +349,8 @@ func TestKeysetContracts(t *testing.T) {
 	listed, err := client.ListKeysets(ctx, manage.ListKeysetsOptions{ShowDisabled: true})
 	require.NoError(t, err)
 	assert.Equal(t, []manage.Keyset{
-		{ID: "keyset-1", Name: "tenant", Description: "tenant keys", IsDisabled: true},
-		{ID: "keyset-2", Name: "default", IsDefault: true},
+		{ID: "00000000-0000-4000-8000-000000000011", Name: "tenant", Description: "tenant keys", IsDisabled: true},
+		{ID: "00000000-0000-4000-8000-000000000012", Name: "default", IsDefault: true},
 	}, listed)
 
 	empty := ""
@@ -452,16 +452,16 @@ func TestInvalidInventoriesAreNotEmptyInventories(t *testing.T) {
 	}
 
 	for _, state := range []string{``, `,"is_disabled":null`} {
-		body.Store(`[{"id":"keyset-1","name":"tenant","description":""` + state + `}]`)
+		body.Store(`[{"id":"00000000-0000-4000-8000-000000000011","name":"tenant","description":""` + state + `}]`)
 		_, err := client.ListKeysets(ctx, manage.ListKeysetsOptions{})
 		require.ErrorIs(t, err, manage.ErrResponse, state)
 	}
 
-	body.Store(`[{"id":"client-1","keyset_id":[]}]`)
+	body.Store(`[{"id":"00000000-0000-4000-8000-000000000001","description":"","keyset_id":[]}]`)
 	_, err := client.ListClients(ctx, manage.ListClientsOptions{})
 	require.ErrorIs(t, err, manage.ErrResponse, "client without a name")
 	for _, association := range []string{`null`, `""`, `[null]`, `[""]`, `{}`} {
-		body.Store(`[{"id":"client-1","name":"app","keyset_id":` + association + `}]`)
+		body.Store(`[{"id":"00000000-0000-4000-8000-000000000001","name":"app","description":"","keyset_id":` + association + `}]`)
 		_, err := client.ListClients(ctx, manage.ListClientsOptions{})
 		require.ErrorIs(t, err, manage.ErrResponse, association)
 	}
@@ -475,14 +475,14 @@ func TestInvalidInventoriesAreNotEmptyInventories(t *testing.T) {
 	page, err := client.ListActors(ctx, manage.ListActorsOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, manage.ActorPage{Items: []manage.Actor{}}, page)
-	body.Store(`[{"id":"keyset-1","name":"tenant","description":"","is_disabled":false}]`)
+	body.Store(`[{"id":"00000000-0000-4000-8000-000000000011","name":"tenant","description":"","is_disabled":false,"extra":{"id":"ignored","keyset_id":null}}]`)
 	keysets, err = client.ListKeysets(ctx, manage.ListKeysetsOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, []manage.Keyset{{ID: "keyset-1", Name: "tenant"}}, keysets)
-	body.Store(`[{"id":"client-1","name":"app","keyset_id":[]}]`)
+	assert.Equal(t, []manage.Keyset{{ID: "00000000-0000-4000-8000-000000000011", Name: "tenant"}}, keysets)
+	body.Store(`[{"id":"00000000-0000-4000-8000-000000000001","name":"app","description":"","keyset_id":[],"extra":{"id":"ignored","keyset_id":null}}]`)
 	clients, err := client.ListClients(ctx, manage.ListClientsOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, []manage.EncryptionClient{{ID: "client-1", Name: "app", KeysetIDs: []string{}}}, clients)
+	assert.Equal(t, []manage.EncryptionClient{{ID: "00000000-0000-4000-8000-000000000001", Name: "app", KeysetIDs: []string{}}}, clients)
 }
 
 func TestIncompleteCreationResponsesFailWithoutRetry(t *testing.T) {
@@ -575,7 +575,7 @@ func TestRefreshedBearerAndEndpointStayPaired(t *testing.T) {
 			requests[i].Add(1)
 			assert.Equal(t, "Bearer "+issued[i], r.Header.Get("Authorization"), "endpoint %d", i)
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w, `[{"id":"keyset-%d","name":"tenant","description":"","is_disabled":false}]`, i)
+			_, _ = fmt.Fprintf(w, `[{"id":"00000000-0000-4000-8000-%012d","name":"tenant","description":"","is_disabled":false}]`, i)
 		}))
 		t.Cleanup(endpoints[i].Close)
 	}
@@ -606,7 +606,7 @@ func TestRefreshedBearerAndEndpointStayPaired(t *testing.T) {
 	for range 2 {
 		keysets, err := client.ListKeysets(t.Context(), manage.ListKeysetsOptions{})
 		require.NoError(t, err)
-		assert.Equal(t, []manage.Keyset{{ID: "keyset-1", Name: "tenant"}}, keysets)
+		assert.Equal(t, []manage.Keyset{{ID: "00000000-0000-4000-8000-000000000001", Name: "tenant"}}, keysets)
 	}
 
 	assert.Equal(t, int32(2), exchanges.Load())

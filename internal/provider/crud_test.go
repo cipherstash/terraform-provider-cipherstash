@@ -320,8 +320,8 @@ func TestKeysetGrantSDKCRUDPreservesOtherGrants(t *testing.T) {
 		switch req.URL.Path {
 		case "/list-clients":
 			assert.NoError(t, json.NewEncoder(w).Encode([]map[string]any{
-				{"id": "44444444-4444-4444-8444-444444444444", "name": "other", "keyset_id": []string{keysetID}},
-				{"id": clientID, "name": "existing", "keyset_id": grants},
+				{"id": "44444444-4444-4444-8444-444444444444", "name": "other", "description": "", "keyset_id": []string{keysetID}},
+				{"id": clientID, "name": "existing", "description": "", "keyset_id": grants},
 			}))
 		case "/grant-keyset", "/revoke-keyset":
 			var input struct {
