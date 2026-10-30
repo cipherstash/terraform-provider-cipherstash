@@ -4,17 +4,17 @@ page_title: "cipherstash_client Resource - cipherstash"
 subcategory: ""
 description: |-
   Create a ZeroKMS client and its client key in the configured workspace. This is a registered application client, not an SDK encryption-client object. Its client key is the application-held half of CipherStash's split key architecture.
-  A new client receives access to the workspace's default keyset. This resource tracks that grant but does not manage additional grants created by Terraform or another tool. Changing any argument replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.
-  The client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import with a client UUID requires exactly one existing grant. If the client has several grants, use client UUID/keyset UUID to select one. A client with no grants cannot be imported.
+  A new client receives access to the workspace's default keyset. This resource manages the client identity, not its grants. Import existing pairs into cipherstash_keyset_grant to manage them explicitly, including the automatic default grant. Refresh and import never change grants, and a client remains managed even with no grants. Changing name or description replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.
+  The client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import by client UUID with zero, one or many grants; keyset_id is null for these imports. Legacy client UUID/keyset UUID imports retain the second UUID as historical metadata only, without checking or managing that grant. Use the cipherstash_client data source's keyset_ids for current grant inventory.
 ---
 
 # cipherstash_client (Resource)
 
 Create a ZeroKMS client and its client key in the configured workspace. This is a registered application client, not an SDK encryption-client object. Its client key is the application-held half of CipherStash's split key architecture.
 
-A new client receives access to the workspace's default keyset. This resource tracks that grant but does not manage additional grants created by Terraform or another tool. Changing any argument replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.
+A new client receives access to the workspace's default keyset. This resource manages the client identity, not its grants. Import existing pairs into `cipherstash_keyset_grant` to manage them explicitly, including the automatic default grant. Refresh and import never change grants, and a client remains managed even with no grants. Changing name or description replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.
 
-The client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import with a client UUID requires exactly one existing grant. If the client has several grants, use `client UUID/keyset UUID` to select one. A client with no grants cannot be imported.
+The client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import by client UUID with zero, one or many grants; `keyset_id` is null for these imports. Legacy `client UUID/keyset UUID` imports retain the second UUID as historical metadata only, without checking or managing that grant. Use the `cipherstash_client` data source's `keyset_ids` for current grant inventory.
 
 
 
@@ -30,4 +30,4 @@ The client key value is returned only at creation and stored in Terraform state 
 
 - `client_key` (String, Sensitive) Secret client key value, encoded as base64 for `CS_CLIENT_KEY` in the coordinated Go SDK. Returned only at creation and retained in Terraform state; null after import. Marking it sensitive does not remove it from state or saved plans. Follow your application's SDK requirements for key encoding.
 - `id` (String) Client ID as a UUID. Use this value for `CS_CLIENT_ID` in your application.
-- `keyset_id` (String) ID of the workspace's default keyset granted at creation, or the keyset selected from an existing grant during import. This value is computed, not configurable. The tracked grant must remain present; this resource leaves other grants unchanged.
+- `keyset_id` (String, Deprecated) Deprecated historical metadata: the default keyset ID returned at creation, or the second UUID supplied to a legacy pair import. Existing state values are preserved even if the grant disappears. Null for new UUID-only imports, regardless of grant count. This value is computed, not configurable, and does not describe current access or imply grant ownership.

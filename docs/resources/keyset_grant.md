@@ -5,7 +5,7 @@ subcategory: ""
 description: |-
   Grant a ZeroKMS client access to one keyset. This resource manages a single client/keyset pair, not the client's full set of grants. Your application must still select the keyset in its SDK configuration.
   Destroy revokes only this grant; it does not delete the client or keyset, or change other grants. Changing either ID replaces the grant without transferring any other grants.
-  Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. Do not separately manage the grant tracked by a cipherstash_client resource, including its automatic default-keyset grant; that resource requires the grant to remain present.
+  Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. This includes the automatic default-keyset grant of a cipherstash_client: the client resource manages identity only and does not require that grant to remain present.
   Local tests cover this resource, but its lifecycle has not been verified against the live service. Earlier live grant and revoke probes returned HTTP 500 with the default grant unchanged.
 ---
 
@@ -15,7 +15,7 @@ Grant a ZeroKMS client access to one keyset. This resource manages a single clie
 
 Destroy revokes only this grant; it does not delete the client or keyset, or change other grants. Changing either ID replaces the grant without transferring any other grants.
 
-Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. Do not separately manage the grant tracked by a `cipherstash_client` resource, including its automatic default-keyset grant; that resource requires the grant to remain present.
+Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. This includes the automatic default-keyset grant of a `cipherstash_client`: the client resource manages identity only and does not require that grant to remain present.
 
 Local tests cover this resource, but its lifecycle has not been verified against the live service. Earlier live grant and revoke probes returned HTTP 500 with the default grant unchanged.
 

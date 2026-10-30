@@ -207,7 +207,7 @@ func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
 				case "failed list":
 					return nil, control.ErrAuthentication
 				case "missing tracked grant":
-					return []control.EncryptionClient{{ID: clientID, KeysetIDs: []string{tenantKeysetID}}}, nil
+					return []control.EncryptionClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID}}}, nil
 				default:
 					return []control.EncryptionClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID, keysetID}}}, nil
 				}
@@ -220,7 +220,7 @@ func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
 			case "absent":
 				noErrors(t, resp.Diagnostics)
 				require.True(t, resp.State.Raw.IsNull(), "absent client remains in state")
-			case "failed list", "missing tracked grant":
+			case "failed list":
 				require.True(t, resp.Diagnostics.HasError(), "%v", resp.Diagnostics)
 				require.True(t, resp.State.Raw.Equal(state.Raw), "failed refresh must retain state")
 			default:
@@ -236,18 +236,18 @@ func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
 	}
 }
 
-func TestClientImportSelectsGrant(t *testing.T) {
+func TestClientImportPreservesHistoricalMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		name, id string
 		grants   []string
 		want     string
 		fail     bool
 	}{
-		{"single", clientID, []string{keysetID}, keysetID, false},
-		{"ambiguous", clientID, []string{tenantKeysetID, keysetID}, "", true},
+		{"single", clientID, []string{keysetID}, "", false},
+		{"multiple", clientID, []string{tenantKeysetID, keysetID}, "", false},
 		{"explicit second", clientID + "/" + keysetID, []string{tenantKeysetID, keysetID}, keysetID, false},
-		{"missing selected", clientID + "/" + keysetID, []string{tenantKeysetID}, "", true},
-		{"no grants", clientID, nil, "", true},
+		{"missing selected", clientID + "/" + keysetID, []string{tenantKeysetID}, keysetID, false},
+		{"no grants", clientID, nil, "", false},
 		{"invalid uuid", "not-a-uuid", nil, "", true},
 		{"too many segments", clientID + "/" + keysetID + "/extra", nil, "", true},
 		{"missing object", clientID, nil, "", true},
@@ -271,6 +271,7 @@ func TestClientImportSelectsGrant(t *testing.T) {
 			noErrors(t, resp.State.Get(context.Background(), &state))
 			require.Equal(t, clientID, state.ID.ValueString())
 			require.Equal(t, tc.want, state.KeysetID.ValueString())
+			require.Equal(t, tc.want == "", state.KeysetID.IsNull())
 			require.True(t, state.ClientKey.IsNull(), "import invented secret")
 		})
 	}

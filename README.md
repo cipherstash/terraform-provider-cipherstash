@@ -56,11 +56,11 @@ Give each managed object one owner. For example, Terraform can manage a shared a
 
 ### Manage client access
 
-A new ZeroKMS client receives a grant to the workspace's default keyset. The client resource records that keyset in its computed `keyset_id`; you cannot configure that argument. It leaves additional grants unchanged during refresh, including grants created by a provisioning worker.
+A new ZeroKMS client receives a grant to the workspace's default keyset. The client resource manages identity, not grants. Its deprecated, computed `keyset_id` records historical creation or import metadata, not current access; you cannot configure that argument. Refresh preserves this value and the client key even if the historical grant disappears or the client has no grants.
 
-Use `cipherstash_keyset_grant` to manage an additional grant. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Import checks that the pair exists without changing service state.
+Use `cipherstash_keyset_grant` to manage any grant explicitly, including the automatic default grant. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state.
 
-Do not separately manage the grant tracked by a `cipherstash_client` resource, whether it is the default grant or one selected during import. The client resource requires that grant to remain present. If it disappears, refresh reports an error and keeps the client in state. Restore the grant outside Terraform or deliberately replace the client.
+Client refresh and import never add, restore or revoke grants. Use the existing `cipherstash_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
 
 Replacing a client creates a different identity. Grants associated with the old client are not transferred to it. Plan credential and grant changes separately; consider `lifecycle { prevent_destroy = true }` for an established client. This provider does not implement an application cutover or prove that deleting a client physically removes every grant record on the service.
 
@@ -91,11 +91,13 @@ Import brings an existing object under Terraform management; it does not recover
 | Resource | Import ID | What import cannot do |
 | --- | --- | --- |
 | Actor | Actor ID, such as `app-JBSWY3DPEHPK3PXP` | Recover `access_key` or `token_expiry`; both are null after import. Setting a token lifetime afterward can require replacement. |
-| Client | Client UUID when exactly one grant exists; otherwise `client UUID/keyset UUID` | Recover `client_key`, choose among several grants, or create a missing grant. The selected grant must exist. A client with no grants cannot be imported. |
+| Client | Client UUID, with zero, one or many grants; legacy `client UUID/keyset UUID` is also accepted | Recover `client_key` or change grants. UUID-only imports leave `keyset_id` null. Legacy pair imports record the second UUID as historical metadata only, even if that grant no longer exists. |
 | Keyset | Keyset UUID | Delete key material or select the workspace default. Import includes disabled keysets; set `enabled = false` to keep one disabled. |
 | Grant | `client UUID/keyset UUID` | Create the pair or change other grants. |
 
 The example IDs are placeholders. To keep an imported actor or client, use its previously saved credential from your secret store. To obtain a new credential, replace the resource and plan the change for its consumers.
+
+Existing development state needs no manual editing or schema upgrade: the client ID, client key and computed string `keyset_id` retain their representation and saved values. Old UUID-only imports that previously selected one grant keep that historical value; new UUID-only imports do not select a grant. A legacy pair import validates both UUIDs and the client's existence, but does not validate the keyset or grant. Import the pair separately as a `cipherstash_keyset_grant` if Terraform should own that permission.
 
 ### Disable or stop managing a keyset
 

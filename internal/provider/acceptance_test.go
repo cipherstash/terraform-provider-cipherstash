@@ -170,6 +170,7 @@ data "cipherstash_client" "test" {
 			{Config: configuration("", "app", "member"), Check: check(false)},
 			{Config: configuration("", "app", "member"), Check: check(false)},
 			{ResourceName: "cipherstash_actor.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"access_key", "token_expiry"}},
+			{ResourceName: "cipherstash_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key", "keyset_id"}},
 			{
 				ResourceName: "cipherstash_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key"},
 				ImportStateIdFunc: func(s *terraform.State) (string, error) {

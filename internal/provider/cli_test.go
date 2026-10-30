@@ -257,12 +257,31 @@ resource "cipherstash_keyset_grant" "app" {
 		}},
 		{Config: grant("cipherstash_client.api.keyset_id"), ExpectError: regexp.MustCompile("Grant already exists")},
 		{Config: base, Check: check(2), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+		{
+			Config: grant(fmt.Sprintf("%q", keysetID)), ResourceName: "cipherstash_keyset_grant.app", ImportState: true, ImportStatePersist: true,
+			ImportStateIdFunc: func(s *terraform.State) (string, error) {
+				return s.RootModule().Resources["cipherstash_client.api"].Primary.ID + "/" + keysetID, nil
+			},
+		},
+		{Config: grant(fmt.Sprintf("%q", keysetID)), Check: check(2), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+		{Config: base, Check: func(s *terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+
+			client := s.RootModule().Resources["cipherstash_client.api"].Primary
+			if len(f.clients) != 1 || client.ID != f.clients[0].ID || client.Attributes["client_key"] != f.secrets[client.ID] || client.Attributes["keyset_id"] != keysetID || !slices.Equal(f.clients[0].KeysetIDs, []string{f.keysets[2].ID}) {
+				return fmt.Errorf("revoking the imported default grant changed the client or an unrelated grant")
+			}
+
+			return nil
+		}},
+		{Config: base, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 	}
 	resource.UnitTest(t, tc)
 }
 
 func TestCLIImports(t *testing.T) {
-	for _, kind := range []string{"actor", "client", "client-selected-grant", "keyset", "keyset_grant"} {
+	for _, kind := range []string{"actor", "client", "client-zero-grants", "client-many-grants", "client-legacy-pair", "client-legacy-absent-grant", "keyset", "keyset_grant"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newServiceFixture(t)
 			tc := cliTestCase(t, f)
@@ -279,21 +298,32 @@ func TestCLIImports(t *testing.T) {
 					statecheck.ExpectKnownValue(address, tfjsonpath.New("access_key"), knownvalue.Null()),
 					statecheck.ExpectKnownValue(address, tfjsonpath.New("token_expiry"), knownvalue.Null()),
 				}
-			case "client", "client-selected-grant":
+			case "client", "client-zero-grants", "client-many-grants", "client-legacy-pair", "client-legacy-absent-grant":
 				id, address = clientID, "cipherstash_client.app"
 				f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 				config = "resource \"cipherstash_client\" \"app\" {\n name = \"imported\"\n description = \"existing\"\n}"
-				selected := keysetID
-				if kind == "client-selected-grant" {
+				var historical knownvalue.Check = knownvalue.Null()
+				switch kind {
+				case "client-zero-grants", "client-legacy-absent-grant":
+					f.clients[0].KeysetIDs = []string{}
+				case "client-many-grants", "client-legacy-pair":
 					f.clients[0].KeysetIDs = append(f.clients[0].KeysetIDs, tenantKeysetID)
-					selected = tenantKeysetID
-					id += "/" + selected
-					rejected = []resource.TestStep{{Config: cliProvider + config, ResourceName: address, ImportState: true, ImportStatePersist: true, ImportStateId: clientID, ExpectError: regexp.MustCompile("Ambiguous import grant")}}
 				}
+
+				if kind == "client-legacy-pair" || kind == "client-legacy-absent-grant" {
+					id += "/" + tenantKeysetID
+					historical = knownvalue.StringExact(tenantKeysetID)
+				}
+
+				rejected = []resource.TestStep{{
+					PreConfig: func() { f.edit(func() { f.faults = []serviceFault{{path: "/list-clients", status: 500}} }) },
+					Config:    cliProvider + config, ResourceName: address, ImportState: true, ImportStatePersist: true, ImportStateId: id,
+					ExpectError: regexp.MustCompile("Cannot import client"),
+				}}
 
 				checks = []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(address, tfjsonpath.New("client_key"), knownvalue.Null()),
-					statecheck.ExpectKnownValue(address, tfjsonpath.New("keyset_id"), knownvalue.StringExact(selected)),
+					statecheck.ExpectKnownValue(address, tfjsonpath.New("keyset_id"), historical),
 				}
 			case "keyset":
 				id, address = tenantKeysetID, "cipherstash_keyset.app"
@@ -485,28 +515,34 @@ resource "cipherstash_keyset_grant" "app" {
 		}
 		resource.UnitTest(t, tc)
 	})
-	t.Run("external grants and missing tracked grant", func(t *testing.T) {
+	t.Run("external grants and historical state", func(t *testing.T) {
 		f := newServiceFixture(t)
 		tc := cliTestCase(t, f)
 		config := cliProvider + "resource \"cipherstash_client\" \"app\" {\n name = \"app\"\n description = \"application\"\n}"
-		var id string
+		var id, secret string
+		check := func(s *terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+
+			client := s.RootModule().Resources["cipherstash_client.app"].Primary
+			if client.ID != id || client.Attributes["client_key"] != secret || client.Attributes["keyset_id"] != keysetID || len(f.mutations) != 1 {
+				return fmt.Errorf("refresh changed client identity, creation secret, historical keyset or grants")
+			}
+
+			return nil
+		}
 		tc.Steps = []resource.TestStep{
 			{Config: config, Check: func(s *terraform.State) error {
-				id = s.RootModule().Resources["cipherstash_client.app"].Primary.ID
-				return nil
-			}},
-			{PreConfig: func() { f.edit(func() { f.clients[0].KeysetIDs = append(f.clients[0].KeysetIDs, tenantKeysetID) }) }, Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
-			{PreConfig: func() { f.edit(func() { f.clients[0].KeysetIDs = []string{tenantKeysetID} }) }, Config: config, ExpectError: regexp.MustCompile("Tracked client grant is missing")},
-			{PreConfig: func() { f.edit(func() { f.clients[0].KeysetIDs = append(f.clients[0].KeysetIDs, keysetID) }) }, Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}, Check: func(s *terraform.State) error {
-				f.mu.Lock()
-				defer f.mu.Unlock()
-
-				if s.RootModule().Resources["cipherstash_client.app"].Primary.ID != id || len(f.mutations) != 1 || !slices.Contains(f.clients[0].KeysetIDs, tenantKeysetID) {
-					return fmt.Errorf("failed refresh forgot the client or changed an external grant")
-				}
+				client := s.RootModule().Resources["cipherstash_client.app"].Primary
+				id, secret = client.ID, client.Attributes["client_key"]
 
 				return nil
 			}},
+			{PreConfig: func() { f.edit(func() { f.clients[0].KeysetIDs = append(f.clients[0].KeysetIDs, tenantKeysetID) }) }, Config: config, Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+			{PreConfig: func() { f.edit(func() { f.clients[0].KeysetIDs = []string{tenantKeysetID} }) }, Config: config, Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+			{PreConfig: func() { f.edit(func() { f.clients[0].KeysetIDs = []string{} }) }, Config: config, Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+			{PreConfig: func() { f.edit(func() { f.faults = []serviceFault{{path: "/list-clients", status: 500}} }) }, Config: config, ExpectError: regexp.MustCompile("Cannot read client")},
+			{Config: config, Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 		}
 		resource.UnitTest(t, tc)
 	})

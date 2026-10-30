@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 
 	"github.com/hashicorp/go-uuid"
@@ -41,7 +40,7 @@ func (r *clientResource) Metadata(_ context.Context, req resource.MetadataReques
 
 func (r *clientResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Create a ZeroKMS client and its client key in the configured workspace. This is a registered application client, not an SDK encryption-client object. Its client key is the application-held half of CipherStash's split key architecture.\n\nA new client receives access to the workspace's default keyset. This resource tracks that grant but does not manage additional grants created by Terraform or another tool. Changing any argument replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.\n\nThe client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import with a client UUID requires exactly one existing grant. If the client has several grants, use `client UUID/keyset UUID` to select one. A client with no grants cannot be imported.",
+		Description: "Create a ZeroKMS client and its client key in the configured workspace. This is a registered application client, not an SDK encryption-client object. Its client key is the application-held half of CipherStash's split key architecture.\n\nA new client receives access to the workspace's default keyset. This resource manages the client identity, not its grants. Import existing pairs into `cipherstash_keyset_grant` to manage them explicitly, including the automatic default grant. Refresh and import never change grants, and a client remains managed even with no grants. Changing name or description replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.\n\nThe client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import by client UUID with zero, one or many grants; `keyset_id` is null for these imports. Legacy `client UUID/keyset UUID` imports retain the second UUID as historical metadata only, without checking or managing that grant. Use the `cipherstash_client` data source's `keyset_ids` for current grant inventory.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -59,9 +58,10 @@ func (r *clientResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"keyset_id": schema.StringAttribute{
-				Computed:      true,
-				Description:   "ID of the workspace's default keyset granted at creation, or the keyset selected from an existing grant during import. This value is computed, not configurable. The tracked grant must remain present; this resource leaves other grants unchanged.",
-				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
+				Computed:           true,
+				Description:        "Deprecated historical metadata: the default keyset ID returned at creation, or the second UUID supplied to a legacy pair import. Existing state values are preserved even if the grant disappears. Null for new UUID-only imports, regardless of grant count. This value is computed, not configurable, and does not describe current access or imply grant ownership.",
+				DeprecationMessage: "Use the cipherstash_client data source's keyset_ids for current grants and cipherstash_keyset_grant to manage individual pairs. keyset_id is historical metadata only.",
+				PlanModifiers:      []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"client_key": schema.StringAttribute{
 				Computed:      true,
@@ -132,12 +132,8 @@ func (r *clientResource) Read(ctx context.Context, req resource.ReadRequest, res
 
 	state.Name = types.StringValue(found.Name)
 	state.Description = types.StringValue(found.Description)
-	if !slices.Contains(found.KeysetIDs, state.KeysetID.ValueString()) {
-		resp.Diagnostics.AddError("Tracked client grant is missing", "The client still exists, but its recorded keyset grant is missing. State is retained. Restore the grant outside Terraform or deliberately replace the client; replacement loses all external grants.")
-		return
-	}
 
-	// client_key is not readable; keep whatever state has.
+	// Keep the one-time secret and historical keyset metadata, not live grants.
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
 }
 
@@ -158,8 +154,8 @@ func (r *clientResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 }
 
-// ImportState accepts a client UUID, or client UUID/keyset UUID to select an
-// existing grant. Neither form can recover the creation secret.
+// ImportState accepts a client UUID, or a legacy client UUID/keyset UUID whose
+// second component is historical metadata only. Neither form changes grants.
 func (r *clientResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	parts := strings.Split(req.ID, "/")
 	if len(parts) < 1 || len(parts) > 2 {
@@ -185,25 +181,14 @@ func (r *clientResource) ImportState(ctx context.Context, req resource.ImportSta
 		return
 	}
 
-	var keysetID string
+	keysetID := types.StringNull()
 	if len(parts) == 2 {
-		keysetID = parts[1]
-		if !slices.Contains(found.KeysetIDs, keysetID) {
-			resp.Diagnostics.AddError("Invalid import grant", "The specified keyset is not granted to this client.")
-			return
-		}
-	} else {
-		if len(found.KeysetIDs) != 1 {
-			resp.Diagnostics.AddError("Ambiguous import grant", "A client UUID alone requires exactly one grant. For several grants, use client UUID/keyset UUID to choose the tracked grant. A client without grants cannot be imported.")
-			return
-		}
-
-		keysetID = found.KeysetIDs[0]
+		keysetID = types.StringValue(parts[1])
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, clientModel{
 		ID: types.StringValue(found.ID), Name: types.StringValue(found.Name), Description: types.StringValue(found.Description),
-		KeysetID: types.StringValue(keysetID), ClientKey: types.StringNull(),
+		KeysetID: keysetID, ClientKey: types.StringNull(),
 	})...)
 }
 
