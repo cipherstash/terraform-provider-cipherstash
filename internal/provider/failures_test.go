@@ -167,22 +167,31 @@ func TestSDKActorPaginationAndMetadata(t *testing.T) {
 
 func TestSDKKeysetPartialWrites(t *testing.T) {
 	for _, test := range []struct {
-		name, endpoint, description string
-		afterWrite, enabled         bool
+		name, endpoint, description           string
+		afterWrite, enabled, initiallyEnabled bool
 	}{
-		{"metadata rejected", "/modify-keyset", "Worker owned", false, true},
-		{"metadata applied then error", "/modify-keyset", "updated", true, true},
-		{"disable rejected", "/disable-keyset", "updated", false, true},
-		{"disable applied then error", "/disable-keyset", "updated", true, false},
-		{"confirmation failed", "/list-keysets", "updated", false, false},
+		{"metadata rejected", "/modify-keyset", "Worker owned", false, true, true},
+		{"metadata applied then error", "/modify-keyset", "updated", true, true, true},
+		{"disable rejected", "/disable-keyset", "updated", false, true, true},
+		{"disable applied then error", "/disable-keyset", "updated", true, false, true},
+		{"confirmation failed", "/list-keysets", "updated", false, false, true},
+		{"enable rejected", "/enable-keyset", "Worker owned", false, false, false},
+		{"enable applied then error", "/enable-keyset", "Worker owned", true, true, false},
+		{"metadata and confirmation rejected after enable", "/modify-keyset", "Worker owned", false, true, false},
+		{"metadata applied then error after enable", "/modify-keyset", "updated", true, true, false},
+		{"confirmation failed after enable", "/list-keysets", "updated", false, true, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newServiceFixture(t)
+			f.keysets[1].IsDisabled = !test.initiallyEnabled
 			f.faults = []serviceFault{{path: test.endpoint, afterWrite: test.afterWrite, status: 500}}
+			if test.name == "metadata and confirmation rejected after enable" {
+				f.faults = append(f.faults, serviceFault{path: "/list-keysets", status: 500})
+			}
 			r := &keysetResource{client: fixtureClient(t, fixtureTransport(t, "admin", f.ServeHTTP))}
-			model := keysetModel{ID: types.StringValue(tenantKeysetID), Name: types.StringValue("external"), Description: types.StringValue("Worker owned"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)}
+			model := keysetModel{ID: types.StringValue(tenantKeysetID), Name: types.StringValue("external"), Description: types.StringValue("Worker owned"), Enabled: types.BoolValue(test.initiallyEnabled), IsDefault: types.BoolValue(false)}
 			before := resourceState(t, r, model)
-			model.Description, model.Enabled = types.StringValue("updated"), types.BoolValue(false)
+			model.Description, model.Enabled = types.StringValue("updated"), types.BoolValue(!test.initiallyEnabled)
 			plan := resourceState(t, r, model)
 			resp := resource.UpdateResponse{State: before}
 			r.Update(context.Background(), resource.UpdateRequest{State: before, Plan: tfsdk.Plan(plan)}, &resp)

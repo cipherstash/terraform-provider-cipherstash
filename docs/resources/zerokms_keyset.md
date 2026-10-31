@@ -28,7 +28,7 @@ Give each keyset one owner: Terraform or your provisioning automation, not both.
 
 ### Optional
 
-- `enabled` (Boolean) Whether the keyset is enabled. Defaults to `true`. Set to `false` to disable access without deleting key material or grants. To keep an imported keyset disabled, set this to `false` in your configuration. A new keyset is created enabled, then disabled in a separate request if this is `false`.
+- `enabled` (Boolean) Whether the keyset is enabled. Defaults to `true`. Set to `false` to disable access without deleting key material or grants. To keep an imported keyset disabled, set this to `false` in your configuration. A new keyset is created enabled, then disabled in a separate request if this is `false`. Metadata changes require an enabled keyset: a planned enable happens before metadata updates, and a planned disable happens afterward. Metadata changes to an already-disabled keyset require `enabled = true`; the provider never temporarily enables a keyset configured to remain disabled.
 
 ### Read-Only
 

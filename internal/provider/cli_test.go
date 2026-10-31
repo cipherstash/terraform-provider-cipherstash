@@ -163,11 +163,11 @@ func TestCLIKeysetLifecycle(t *testing.T) {
 			configuration := func(description string, enabled bool) string {
 				return cliProvider + fmt.Sprintf(`
 resource "cipherstash_zerokms_keyset" "app" {
-  name = "application"
+  name = "application-%s"
   description = %q
   enabled = %t
 }
-`, description, enabled)
+`, description, description, enabled)
 			}
 			var id string
 			check := func(enabled bool, description string) resource.TestCheckFunc {
@@ -182,7 +182,7 @@ resource "cipherstash_zerokms_keyset" "app" {
 
 					id = current
 					i := slices.IndexFunc(f.keysets, func(k control.ZeroKMSKeyset) bool { return k.ID == id })
-					if i < 0 || f.keysets[i].IsDisabled == enabled || f.keysets[i].Description != description {
+					if i < 0 || f.keysets[i].IsDisabled == enabled || f.keysets[i].Description != description || f.keysets[i].Name != "application-"+description {
 						return fmt.Errorf("keyset inventory does not match configuration")
 					}
 
@@ -194,6 +194,17 @@ resource "cipherstash_zerokms_keyset" "app" {
 				{Config: configuration("updated", !initiallyEnabled), Check: check(!initiallyEnabled, "updated"), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_zerokms_keyset.app", plancheck.ResourceActionUpdate)}}},
 				{Config: configuration("updated", initiallyEnabled), Check: check(initiallyEnabled, "updated")},
 			}
+			// A disabled keyset must never be enabled implicitly to edit metadata.
+			var writes int
+			disabled := configuration("updated", false)
+			tc.Steps = append(tc.Steps,
+				resource.TestStep{Config: disabled, Check: check(false, "updated")},
+				resource.TestStep{PreConfig: func() { f.edit(func() { writes = len(f.mutations) }) }, Config: strings.Replace(disabled, `name = "application-updated"`, `name = "renamed"`, 1), PlanOnly: true, ExpectError: regexp.MustCompile("Cannot modify disabled keyset")},
+				resource.TestStep{Config: strings.Replace(disabled, `description = "updated"`, `description = "edited"`, 1), PlanOnly: true, ExpectError: regexp.MustCompile("Cannot modify disabled keyset")},
+				resource.TestStep{PreConfig: func() {
+					f.edit(func() { require.Len(t, f.mutations, writes, "rejected metadata changes wrote to CipherStash") })
+				}, Config: disabled, Check: check(false, "updated"), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+			)
 			resource.UnitTest(t, tc)
 			f.edit(func() {
 				assert.Len(t, f.keysets, 3, "destroy removed key material")

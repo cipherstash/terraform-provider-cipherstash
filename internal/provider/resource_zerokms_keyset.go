@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 
@@ -61,7 +62,7 @@ func (r *keysetResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			},
 			"enabled": schema.BoolAttribute{
 				Optional: true, Computed: true, Default: booldefault.StaticBool(true),
-				Description: "Whether the keyset is enabled. Defaults to `true`. Set to `false` to disable access without deleting key material or grants. To keep an imported keyset disabled, set this to `false` in your configuration. A new keyset is created enabled, then disabled in a separate request if this is `false`.",
+				Description: "Whether the keyset is enabled. Defaults to `true`. Set to `false` to disable access without deleting key material or grants. To keep an imported keyset disabled, set this to `false` in your configuration. A new keyset is created enabled, then disabled in a separate request if this is `false`. Metadata changes require an enabled keyset: a planned enable happens before metadata updates, and a planned disable happens afterward. Metadata changes to an already-disabled keyset require `enabled = true`; the provider never temporarily enables a keyset configured to remain disabled.",
 			},
 			"is_default": schema.BoolAttribute{
 				Computed: true, Description: "Whether CipherStash identifies this as the workspace's default keyset. This value is computed; this resource cannot select the default keyset.",
@@ -80,9 +81,25 @@ func (r *keysetResource) Configure(_ context.Context, req resource.ConfigureRequ
 	r.client = client
 }
 
-func (r *keysetResource) ModifyPlan(_ context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+func (r *keysetResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	if req.Plan.Raw.IsNull() {
 		resp.Diagnostics.AddWarning("Destroy disables the keyset", "Applying this destroy will disable the keyset, interrupting clients that use it, then remove it from Terraform state. The keyset and key material remain remotely. Import its UUID to manage it again.")
+		return
+	}
+	if req.State.Raw.IsNull() {
+		return
+	}
+
+	var plan, current keysetModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &current)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if current.Enabled.Equal(types.BoolValue(false)) && plan.Enabled.Equal(types.BoolValue(false)) &&
+		((!plan.Name.IsUnknown() && !plan.Name.Equal(current.Name)) || (!plan.Description.IsUnknown() && !plan.Description.Equal(current.Description))) {
+		resp.Diagnostics.AddError("Cannot modify disabled keyset", "CipherStash requires an enabled keyset to change its name or description. Set enabled = true to enable it before changing metadata. The provider will not temporarily enable a keyset configured to remain disabled.")
 	}
 }
 
@@ -155,22 +172,38 @@ func (r *keysetResource) applyChanges(ctx context.Context, plan, current keysetM
 		opts.Description = &description
 	}
 
-	if opts.Name != nil || opts.Description != nil {
+	// Unknown configuration can defer this decision until apply.
+	if !current.Enabled.ValueBool() && !plan.Enabled.ValueBool() && (opts.Name != nil || opts.Description != nil) {
+		diagnostics.AddError("Cannot modify disabled keyset", "CipherStash requires an enabled keyset to change its name or description. Set enabled = true to enable it before changing metadata. The provider will not temporarily enable a keyset configured to remain disabled.")
+		return diagnostics
+	}
+
+	// Metadata writes require an enabled keyset. Only enable when explicitly
+	// planned, and retain that success even if the subsequent metadata write fails.
+	if plan.Enabled.ValueBool() && !current.Enabled.ValueBool() {
+		if err := r.client.EnableZeroKMSKeyset(ctx, current.ID.ValueString()); err != nil {
+			diagnostics.AddError("Cannot change keyset enablement", operationError(err))
+		} else {
+			current.Enabled = plan.Enabled
+			diagnostics.Append(state.Set(ctx, current)...)
+		}
+	}
+
+	if !diagnostics.HasError() && (opts.Name != nil || opts.Description != nil) {
 		if err := r.client.ModifyZeroKMSKeyset(ctx, current.ID.ValueString(), opts); err != nil {
-			diagnostics.AddError("Cannot modify keyset", operationError(err))
+			detail := operationError(err)
+			if errors.Is(err, control.ErrForbidden) {
+				detail = "CipherStash denied the metadata update. Check whether the keyset is disabled, as well as the Admin credential's permissions. Metadata changes require an enabled keyset."
+			}
+			diagnostics.AddError("Cannot modify keyset", detail)
 		} else {
 			current.Name, current.Description = plan.Name, plan.Description
 			diagnostics.Append(state.Set(ctx, current)...)
 		}
 	}
 
-	if !diagnostics.HasError() && !plan.Enabled.Equal(current.Enabled) {
-		change := r.client.DisableZeroKMSKeyset
-		if plan.Enabled.ValueBool() {
-			change = r.client.EnableZeroKMSKeyset
-		}
-
-		if err := change(ctx, current.ID.ValueString()); err != nil {
+	if !diagnostics.HasError() && !plan.Enabled.ValueBool() && current.Enabled.ValueBool() {
+		if err := r.client.DisableZeroKMSKeyset(ctx, current.ID.ValueString()); err != nil {
 			diagnostics.AddError("Cannot change keyset enablement", operationError(err))
 		} else {
 			current.Enabled = plan.Enabled

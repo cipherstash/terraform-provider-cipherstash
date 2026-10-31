@@ -272,6 +272,12 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		switch r.URL.Path {
 		case "/modify-keyset":
+			// The live API rejects metadata changes while a keyset is disabled.
+			if f.keysets[i].IsDisabled {
+				http.Error(w, "Keyset disabled: request could not be processed because the keyset has been disabled", http.StatusForbidden)
+				return
+			}
+
 			if input.Name != nil {
 				f.keysets[i].Name = *input.Name
 			}
