@@ -16,7 +16,7 @@ Pass that CRN and token source to `manage.NewClient`. It makes no network reques
 
 `manage.Config[K auth.AccessKey]` binds `WorkspaceCRN` to `CS_WORKSPACE_CRN` and `ClientAccessKey` to `CS_CLIENT_ACCESS_KEY`, both required by `go-envconfig`. These are the same environment names as the Terraform provider. Select a concrete `auth.ControlAccessKey`, `auth.AdminAccessKey` or `auth.MemberAccessKey` type for `K`; decoding checks syntax, while signed-token verification enforces that type's role policy. For example, `envconfig.Process(ctx, &cfg)` can populate a `manage.Config[auth.AdminAccessKey]`; pass `cfg.WorkspaceCRN` and `cfg.ClientAccessKey` to `auth.NewTokenSource`. The struct does not load the environment, construct a client or grant access automatically.
 
-The Terraform provider decodes its selected argument/environment values into `manage.Config[auth.ControlAccessKey]`. Terraform handles omitted, null and unknown arguments before shared decoding, preserving the precedence rules below and Control/Admin authentication.
+The Terraform provider decodes its selected argument/environment values into `manage.Config[auth.AdminAccessKey]`. Terraform handles omitted, null and unknown arguments before shared decoding, preserving the precedence rules below. Provider authentication requires a verified Admin role; the shared SDK's Control and Member policies remain available to other consumers.
 
 This replaces the old `CRN`, `ControlAccessKey` and `ClientID` fields. There is no `CS_CONTROL_ACCESS_KEY` fallback; application client IDs belong in consumer configuration rather than shared management credentials. Applications migrating from BNDRY must change both auth and manage imports together and pin a revision containing both packages; no compatibility aliases to BNDRY types are provided. BNDRY's existing worker configuration is not changed here.
 
@@ -39,23 +39,22 @@ The linked CipherStash documentation explains the product concepts. This reposit
 
 Set `workspace_crn` or `CS_WORKSPACE_CRN` to the workspace's [CipherStash Resource Name (CRN)](https://cipherstash.com/docs/reference/workspace/configuration), in the format `crn:<region>.aws:<workspace ID>`. The CRN identifies both the workspace and its region. The provider does not discover a workspace or read a saved profile.
 
-Use a Control access key for management operations. Admin keys are also accepted, and the CTS API contract requires Admin for actor creation; a Control-only key does not promise access to every resource operation. Create this credential outside the Terraform configuration that uses it: the provider cannot safely manage its own authentication credential. See the [provider reference](docs/index.md) for the credential arguments.
+Use an Admin access key. This is required for every provider configuration, including roots that manage only ZeroKMS resources or read data sources. Control-only credentials that previously configured the provider are now rejected. Create this credential outside the Terraform configuration that uses it: the provider cannot safely manage its own authentication credential. See the [provider reference](docs/index.md) for the credential arguments.
 
 ```hcl
 provider "cipherstash" {
   workspace_crn = var.workspace_crn
-  # Supply the credential through CS_CLIENT_ACCESS_KEY.
-  # Use an Admin key if this root creates actors.
+  # Supply an Admin credential through CS_CLIENT_ACCESS_KEY.
 }
 ```
 
-Supply the key securely through `CS_CLIENT_ACCESS_KEY` or the sensitive `client_access_key` argument. For both `workspace_crn` and `client_access_key`, an omitted or null argument uses its environment variable. Explicit known values override the environment. Empty, unknown or malformed selected values fail without falling back to another source. Member-only credentials are rejected even though the environment variable is named `CS_CLIENT_ACCESS_KEY`.
+Supply the key securely through `CS_CLIENT_ACCESS_KEY` or the sensitive `client_access_key` argument. For both `workspace_crn` and `client_access_key`, an omitted or null argument uses its environment variable. Explicit known values override the environment. Empty, unknown or malformed selected values fail without falling back to another source. Credentials without Admin, including Control-only and Member-only credentials, are rejected even though the environment variable is named `CS_CLIENT_ACCESS_KEY`.
 
 This is a breaking configuration change: replace the provider's `crn` argument with `workspace_crn`, and `access_key` or `control_access_key` with `client_access_key`. Replace `CIPHERSTASH_ACCESS_KEY` or `CS_CONTROL_ACCESS_KEY` with `CS_CLIENT_ACCESS_KEY`. Old arguments are rejected and old environment names are ignored; there are no compatibility aliases. The actor resource's computed `access_key` and all client/keyset resource arguments are unchanged. The provider argument rename alone does not change resource state.
 
 `CS_CLIENT_ID` identifies an application encryption client, not an authentication principal. Neither `manage.Config` nor the provider requires or reads it, and neither automatically grants that client access. Use `cipherstash_zerokms_keyset_grant` to manage explicit pairs. Application client keys remain separate from provider authentication.
 
-Native authentication verifies each exchanged token's RS256 signature against the CipherStash Token Service (CTS) signing keys, issuer, audience, expiry, workspace and Control or Admin role. It also validates the advertised ZeroKMS endpoint before use. Each provider instance owns its token cache and authentication lifetime; reconfiguration and shutdown cancel token refresh. CTS and ZeroKMS still authorize each service request. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; actor creation's Admin requirement does not mean your application needs Admin.
+Native authentication verifies each exchanged token's RS256 signature against the CipherStash Token Service (CTS) signing keys, issuer, audience, expiry, workspace and Admin role. It also validates the advertised ZeroKMS endpoint before use. Each provider instance owns its token cache and authentication lifetime; reconfiguration and shutdown cancel token refresh. CTS and ZeroKMS still authorize each service request. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; the provider's Admin requirement does not mean your application needs Admin.
 
 ### Protect state and credentials
 
@@ -202,7 +201,7 @@ mise run install-local
 export TF_CLI_CONFIG_FILE="$PWD/.local/terraform.rc"
 ```
 
-These commands check and install the provider locally without creating CipherStash resources. Use your own Terraform root with the local provider address and version above. To plan against a workspace, supply its Control or Admin access key securely through `CS_CLIENT_ACCESS_KEY`; do not put the key in shell history or committed variable files. Review the plan and coordinate shared-workspace access before any apply.
+These commands check and install the provider locally without creating CipherStash resources. Use your own Terraform root with the local provider address and version above. To plan against a workspace, supply its Admin access key securely through `CS_CLIENT_ACCESS_KEY`; do not put the key in shell history or committed variable files. Review the plan and coordinate shared-workspace access before any apply.
 
 A lockfile generated from the local mirror describes your local build, not a published provider. After rebuilding changed source, refresh that root's provider checksum with `terraform providers lock -fs-mirror=<provider checkout>/.local/mirror terraform.local/cipherstash/cipherstash` before initializing again. Do not use this development-version process for a production lockfile.
 
@@ -239,7 +238,7 @@ Separate live checks verified that client creation without a specified keyset gr
 
 ### Run approved live acceptance tests
 
-Live actor/client tests use `terraform-plugin-testing`. Coordinate access to the shared workspace and explicitly set `TF_ACC=1`, `TF_ACC_WORKSPACE_ID`, a matching `TF_ACC_CRN`, and `CS_CLIENT_ACCESS_KEY` containing an Admin key for actor creation. Then run `mise run test:acc`.
+Live actor/client tests use `terraform-plugin-testing`. Coordinate access to the shared workspace and explicitly set `TF_ACC=1`, `TF_ACC_WORKSPACE_ID`, a matching `TF_ACC_CRN`, and `CS_CLIENT_ACCESS_KEY` containing an Admin key for provider authentication. Then run `mise run test:acc`.
 
 There is no default acceptance workspace. The task refuses to run without opt-in, and the test rejects a missing workspace ID, mismatched CRN, or missing credential before opening authentication. It creates uniquely named `tf-acc-*` actors and clients, checks refresh/import/replacement, destroys them, and compares actor, access-key, and client IDs against the initial inventory. It does not separately mutate keysets or grants.
 

@@ -257,7 +257,7 @@ func TestProviderOwnsAuthenticationAcrossCallsAndCancelsOnReconfigureAndStop(t *
 }
 
 func TestProviderRejectsWrongVerifiedRole(t *testing.T) {
-	for _, role := range []string{"member", ""} {
+	for _, role := range []string{"control", "member", ""} {
 		t.Run(role, func(t *testing.T) {
 			rt := fixtureTransport(t, role, func(w http.ResponseWriter, req *http.Request) {
 				assert.Fail(t, "wrong-role credential reached management API")

@@ -632,6 +632,7 @@ func TestCLIProviderConfiguration(t *testing.T) {
 		{"legacy cipherstash environment", `provider "cipherstash" {}`, "Client access key required"},
 		{"malformed environment crn", `provider "cipherstash" {}`, "Invalid workspace CRN"},
 		{"malformed environment key", `provider "cipherstash" {}`, "Invalid access key"},
+		{"control credential", `provider "cipherstash" {}`, "Cannot authenticate with CipherStash"},
 		{"member credential", `provider "cipherstash" {}`, "Cannot authenticate with CipherStash"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -659,15 +660,18 @@ func TestCLIProviderConfiguration(t *testing.T) {
 
 			f := newServiceFixture(t)
 			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "existing", KeysetIDs: []string{}}}
-			var memberTransport http.RoundTripper
-			if test.name == "member credential" {
-				memberTransport = fixtureTransport(t, "member", f.ServeHTTP)
+			var rejectedTransport http.RoundTripper
+			switch test.name {
+			case "control credential":
+				rejectedTransport = fixtureTransport(t, "control", f.ServeHTTP)
+			case "member credential":
+				rejectedTransport = fixtureTransport(t, "member", f.ServeHTTP)
 			}
 
 			tc := cliTestCase(t, f)
-			if memberTransport != nil {
+			if rejectedTransport != nil {
 				// cliTestCase restores the process-default transport during cleanup.
-				http.DefaultTransport = memberTransport
+				http.DefaultTransport = rejectedTransport
 			}
 
 			tc.CheckDestroy = func(*terraform.State) error {
@@ -693,8 +697,8 @@ func TestCLIProviderConfiguration(t *testing.T) {
 			resource.UnitTest(t, tc)
 			f.edit(func() {
 				assert.Empty(t, f.mutations, "provider configuration changed inventory")
-				if test.name == "member credential" {
-					assert.Empty(t, f.requests, "Member credential reached management API")
+				if rejectedTransport != nil {
+					assert.Empty(t, f.requests, "non-Admin credential reached management API")
 				}
 			})
 		})

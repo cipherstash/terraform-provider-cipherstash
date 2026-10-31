@@ -116,7 +116,7 @@ func TestProviderCredentialPrecedence(t *testing.T) {
 			}
 
 			f := newServiceFixture(t)
-			base := fixtureTransport(t, "control", f.ServeHTTP)
+			base := fixtureTransport(t, "admin", f.ServeHTTP)
 			observed := make(chan string, 1)
 			rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				if req.URL.Path == "/api/authorise" {
