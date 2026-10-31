@@ -16,6 +16,8 @@ Pass that CRN and token source to `manage.NewClient`. It makes no network reques
 
 `manage.Config[K auth.AccessKey]` binds `WorkspaceCRN` to `CS_WORKSPACE_CRN` and `ClientAccessKey` to `CS_CLIENT_ACCESS_KEY`, both required by `go-envconfig`. These are the same environment names as the Terraform provider. Select a concrete `auth.ControlAccessKey`, `auth.AdminAccessKey` or `auth.MemberAccessKey` type for `K`; decoding checks syntax, while signed-token verification enforces that type's role policy. For example, `envconfig.Process(ctx, &cfg)` can populate a `manage.Config[auth.AdminAccessKey]`; pass `cfg.WorkspaceCRN` and `cfg.ClientAccessKey` to `auth.NewTokenSource`. The struct does not load the environment, construct a client or grant access automatically.
 
+The Terraform provider decodes its selected argument/environment values into `manage.Config[auth.ControlAccessKey]`. Terraform handles omitted, null and unknown arguments before shared decoding, preserving the precedence rules below and Control/Admin authentication.
+
 This replaces the old `CRN`, `ControlAccessKey` and `ClientID` fields. There is no `CS_CONTROL_ACCESS_KEY` fallback; application client IDs belong in consumer configuration rather than shared management credentials. Applications migrating from BNDRY must change both auth and manage imports together and pin a revision containing both packages; no compatibility aliases to BNDRY types are provided. BNDRY's existing worker configuration is not changed here.
 
 ## Before you start

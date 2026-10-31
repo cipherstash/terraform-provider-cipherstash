@@ -18,6 +18,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/sethvargo/go-envconfig"
 )
 
 type Provider struct {
@@ -84,15 +85,22 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		return
 	}
 
-	crn, err := auth.ParseCRN(crnText)
-	if err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("workspace_crn"), "Invalid workspace CRN", "Use a workspace CRN with a supported region and a 16-character workspace ID.")
-		return
-	}
-
-	key, err := auth.ParseControlAccessKey(keyText)
-	if err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("client_access_key"), "Invalid access key", "Use a Control or Admin access key with the CSAK prefix and an ID and secret separated by a dot.")
+	// Decode only the selected values, never falling back to the environment again.
+	var clientConfig control.Config[auth.ControlAccessKey]
+	if err := envconfig.ProcessWith(ctx, &envconfig.Config{
+		Target: &clientConfig,
+		Lookuper: envconfig.MapLookuper(map[string]string{
+			"CS_WORKSPACE_CRN":     crnText,
+			"CS_CLIENT_ACCESS_KEY": keyText,
+		}),
+	}); err != nil {
+		// Config decodes the CRN before the key and stops at the first error.
+		// Keep diagnostics attribute-specific without exposing decoder errors.
+		if clientConfig.WorkspaceCRN.Validate() != nil {
+			resp.Diagnostics.AddAttributeError(path.Root("workspace_crn"), "Invalid workspace CRN", "Use a workspace CRN with a supported region and a 16-character workspace ID.")
+		} else {
+			resp.Diagnostics.AddAttributeError(path.Root("client_access_key"), "Invalid access key", "Use a Control or Admin access key with the CSAK prefix and an ID and secret separated by a dot.")
+		}
 		return
 	}
 
@@ -103,7 +111,7 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
 
-	tokens, err := auth.NewTokenSource(lifetime, crn, key)
+	tokens, err := auth.NewTokenSource(lifetime, clientConfig.WorkspaceCRN, clientConfig.ClientAccessKey)
 	if err == nil {
 		_, err = tokens.Token()
 	}
@@ -115,7 +123,7 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		return
 	}
 
-	client, err := control.NewClient(crn, tokens)
+	client, err := control.NewClient(clientConfig.WorkspaceCRN, tokens)
 	if err != nil {
 		cancel()
 		resp.Diagnostics.AddError("Cannot configure CipherStash client", "Could not initialize the service client for the configured workspace.")
