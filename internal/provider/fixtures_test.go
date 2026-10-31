@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 )
@@ -46,7 +46,7 @@ func fixtureClientKey(seed string) string {
 }
 
 // Management models are not wire types; use the service's snake_case fields.
-func keysetJSON(k control.Keyset) map[string]any {
+func keysetJSON(k control.ZeroKMSKeyset) map[string]any {
 	return map[string]any{"id": k.ID, "name": k.Name, "description": k.Description, "is_disabled": k.IsDisabled, "is_default": k.IsDefault}
 }
 
@@ -56,10 +56,10 @@ type serviceFixture struct {
 	t                 *testing.T
 	mu                sync.Mutex
 	next              int
-	actors            []control.Actor
-	keys              []control.AccessKeyMetadata
-	clients           []control.EncryptionClient
-	keysets           []control.Keyset
+	actors            []control.CTSActor
+	keys              []control.CTSAccessKeyMetadata
+	clients           []control.ZeroKMSClient
+	keysets           []control.ZeroKMSKeyset
 	secrets           map[string]string
 	requests          []string
 	mutations         []string
@@ -81,7 +81,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	t.Helper()
 	f := &serviceFixture{
 		t: t, secrets: map[string]string{}, pageSize: 1,
-		keysets: []control.Keyset{
+		keysets: []control.ZeroKMSKeyset{
 			{ID: keysetID, Name: "default", Description: "Default", IsDefault: true},
 			{ID: tenantKeysetID, Name: "external", Description: "Worker owned"},
 		},
@@ -172,15 +172,15 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if slices.ContainsFunc(f.actors, func(a control.Actor) bool { return a.Name == *input.Name }) {
+		if slices.ContainsFunc(f.actors, func(a control.CTSActor) bool { return a.Name == *input.Name }) {
 			http.Error(w, "duplicate actor name", http.StatusConflict)
 			return
 		}
 
 		id := input.Kind + "-" + f.newID()
-		actor := control.Actor{ID: id, Name: *input.Name, Kind: control.ActorKind(input.Kind), CreatedAt: fixtureTimestamp}
+		actor := control.CTSActor{ID: id, Name: *input.Name, Kind: control.CTSActorKind(input.Kind), CreatedAt: fixtureTimestamp}
 		f.actors = append(f.actors, actor)
-		f.keys = append(f.keys, control.AccessKeyMetadata{ID: "key-" + id, Name: actor.Name, Role: control.Role(input.Role), CreatedAt: fixtureTimestamp})
+		f.keys = append(f.keys, control.CTSAccessKeyMetadata{ID: "key-" + id, Name: actor.Name, Role: control.CTSRole(input.Role), CreatedAt: fixtureTimestamp})
 		f.secrets[id] = "CSAK" + id + ".fixture-secret"
 		body = map[string]any{"actorId": id, "name": actor.Name, "kind": actor.Kind, "role": input.Role, "createdAt": actor.CreatedAt, "accessKey": f.secrets[id]}
 		if f.failActorMetadata {
@@ -203,7 +203,7 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		end := min(start+f.pageSize, len(f.actors))
-		page := control.ActorPage{Items: append([]control.Actor{}, f.actors[start:end]...)}
+		page := control.CTSActorPage{Items: append([]control.CTSActor{}, f.actors[start:end]...)}
 		if end < len(f.actors) {
 			page.NextCursor = strconv.Itoa(end)
 		}
@@ -214,11 +214,11 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		body = page
 	case r.Method == http.MethodGet && r.URL.Path == "/api/access-keys":
-		body = append([]control.AccessKeyMetadata{}, f.keys...)
+		body = append([]control.CTSAccessKeyMetadata{}, f.keys...)
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/actors/"):
 		id := strings.TrimPrefix(r.URL.Path, "/api/actors/")
-		f.actors = slices.DeleteFunc(f.actors, func(a control.Actor) bool { return a.ID == id })
-		f.keys = slices.DeleteFunc(f.keys, func(k control.AccessKeyMetadata) bool { return k.ID == "key-"+id })
+		f.actors = slices.DeleteFunc(f.actors, func(a control.CTSActor) bool { return a.ID == id })
+		f.keys = slices.DeleteFunc(f.keys, func(k control.CTSAccessKeyMetadata) bool { return k.ID == "key-"+id })
 		mutation = true
 	case r.Method == http.MethodPost && r.URL.Path == "/create-client":
 		if input.Name == nil || input.Description == nil {
@@ -229,7 +229,7 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		id := f.newID()
-		f.clients = append(f.clients, control.EncryptionClient{ID: id, Name: *input.Name, Description: *input.Description, KeysetIDs: []string{keysetID}})
+		f.clients = append(f.clients, control.ZeroKMSClient{ID: id, Name: *input.Name, Description: *input.Description, KeysetIDs: []string{keysetID}})
 		f.secrets[id] = fixtureClientKey(id)
 		body = map[string]any{"id": id, "name": *input.Name, "description": *input.Description, "dataset_id": keysetID, "client_key": f.secrets[id]}
 		mutation = true
@@ -241,7 +241,7 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		body = items
 	case r.Method == http.MethodPost && r.URL.Path == "/delete-client":
-		f.clients = slices.DeleteFunc(f.clients, func(c control.EncryptionClient) bool { return c.ID == input.ClientID })
+		f.clients = slices.DeleteFunc(f.clients, func(c control.ZeroKMSClient) bool { return c.ID == input.ClientID })
 		mutation = true
 	case r.Method == http.MethodPost && r.URL.Path == "/create-keyset":
 		if input.Name == nil || input.Description == nil {
@@ -251,7 +251,7 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		k := control.Keyset{ID: f.newID(), Name: *input.Name, Description: *input.Description}
+		k := control.ZeroKMSKeyset{ID: f.newID(), Name: *input.Name, Description: *input.Description}
 		f.keysets = append(f.keysets, k)
 		body, mutation = keysetJSON(k), true
 	case r.Method == http.MethodPost && r.URL.Path == "/list-keysets":
@@ -264,7 +264,7 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		body = items
 	case r.Method == http.MethodPost && (r.URL.Path == "/modify-keyset" || r.URL.Path == "/enable-keyset" || r.URL.Path == "/disable-keyset"):
-		i := slices.IndexFunc(f.keysets, func(k control.Keyset) bool { return k.ID == input.KeysetID })
+		i := slices.IndexFunc(f.keysets, func(k control.ZeroKMSKeyset) bool { return k.ID == input.KeysetID })
 		if i < 0 {
 			http.Error(w, "keyset absent", 404)
 			return
@@ -287,7 +287,7 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		mutation = true
 	case r.Method == http.MethodPost && (r.URL.Path == "/grant-keyset" || r.URL.Path == "/revoke-keyset"):
-		i := slices.IndexFunc(f.clients, func(c control.EncryptionClient) bool { return c.ID == input.ClientID })
+		i := slices.IndexFunc(f.clients, func(c control.ZeroKMSClient) bool { return c.ID == input.ClientID })
 		if i < 0 {
 			http.Error(w, "client absent", 404)
 			return

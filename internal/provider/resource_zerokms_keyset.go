@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -40,12 +40,12 @@ type keysetModel struct {
 }
 
 func (r *keysetResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_keyset"
+	resp.TypeName = req.ProviderTypeName + "_zerokms_keyset"
 }
 
 func (r *keysetResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Create and manage a keyset in ZeroKMS. A keyset is an independent authority-key scope: clients must be granted access to use it. This resource manages the keyset's name, description, and enabled status without creating a client or grant. Use `cipherstash_keyset_grant` to grant access separately.\n\nChanges update the existing keyset without rotating its key material. Destroy disables the keyset and removes it from Terraform state; it does not delete the keyset or its key material. Disabling can interrupt every client using the keyset, but leaves grants in place. Import the retained keyset ID to manage it again.\n\nGive each keyset one owner: Terraform or your provisioning automation, not both. Local tests cover this resource, but its lifecycle has not been verified against the live service. Do not use it as a disposable live test; this provider cannot delete the keyset it creates.",
+		Description: "Create and manage a keyset in ZeroKMS. A keyset is an independent authority-key scope: clients must be granted access to use it. This resource manages the keyset's name, description, and enabled status without creating a client or grant. Use `cipherstash_zerokms_keyset_grant` to grant access separately.\n\nChanges update the existing keyset without rotating its key material. Destroy disables the keyset and removes it from Terraform state; it does not delete the keyset or its key material. Disabling can interrupt every client using the keyset, but leaves grants in place. Import the retained keyset ID to manage it again.\n\nGive each keyset one owner: Terraform or your provisioning automation, not both. Live Development API probes created, enabled and disabled an isolated test keyset. These probes do not establish the full Terraform lifecycle, including metadata updates; verify that lifecycle before production use. A live test keyset is a lasting resource: this provider can disable it but cannot delete it. See the README's live verification limits.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed: true, Description: "Keyset ID as a UUID. Use this ID to import an existing keyset, including one retained after destroy.",
@@ -93,14 +93,14 @@ func (r *keysetResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	created, err := r.client.CreateKeyset(ctx, control.CreateKeysetOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
+	created, err := r.client.CreateZeroKMSKeyset(ctx, control.CreateZeroKMSKeysetOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot create keyset", operationError(err)+" A failed response can follow a completed write. Inspect inventory and import the keyset before retrying if it already exists.")
 		return
 	}
 	defer created.Client.Wipe()
 
-	current := keysetModelFrom(created.Keyset)
+	current := keysetModelFrom(created.ZeroKMSKeyset)
 	// Creation returns an identity before an optional disable or readback can
 	// fail. Keep it so those failures do not orphan a non-deletable keyset.
 	resp.Diagnostics.Append(resp.State.Set(ctx, current)...)
@@ -144,7 +144,7 @@ func (r *keysetResource) Update(ctx context.Context, req resource.UpdateRequest,
 // on a write error. A failed operation is never silently retried or suppressed.
 func (r *keysetResource) applyChanges(ctx context.Context, plan, current keysetModel, state *tfsdk.State) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
-	var opts control.ModifyKeysetOptions
+	var opts control.ModifyZeroKMSKeysetOptions
 	if !plan.Name.Equal(current.Name) {
 		name := plan.Name.ValueString()
 		opts.Name = &name
@@ -156,7 +156,7 @@ func (r *keysetResource) applyChanges(ctx context.Context, plan, current keysetM
 	}
 
 	if opts.Name != nil || opts.Description != nil {
-		if err := r.client.ModifyKeyset(ctx, current.ID.ValueString(), opts); err != nil {
+		if err := r.client.ModifyZeroKMSKeyset(ctx, current.ID.ValueString(), opts); err != nil {
 			diagnostics.AddError("Cannot modify keyset", operationError(err))
 		} else {
 			current.Name, current.Description = plan.Name, plan.Description
@@ -165,9 +165,9 @@ func (r *keysetResource) applyChanges(ctx context.Context, plan, current keysetM
 	}
 
 	if !diagnostics.HasError() && !plan.Enabled.Equal(current.Enabled) {
-		change := r.client.DisableKeyset
+		change := r.client.DisableZeroKMSKeyset
 		if plan.Enabled.ValueBool() {
-			change = r.client.EnableKeyset
+			change = r.client.EnableZeroKMSKeyset
 		}
 
 		if err := change(ctx, current.ID.ValueString()); err != nil {
@@ -216,7 +216,7 @@ func (r *keysetResource) Delete(ctx context.Context, req resource.DeleteRequest,
 	}
 
 	if !found.IsDisabled {
-		if err := r.client.DisableKeyset(ctx, found.ID); err != nil {
+		if err := r.client.DisableZeroKMSKeyset(ctx, found.ID); err != nil {
 			resp.Diagnostics.AddError("Cannot disable keyset for destroy", operationError(err)+" The resource remains in state.")
 			return
 		}
@@ -261,8 +261,8 @@ func (r *keysetResource) ImportState(ctx context.Context, req resource.ImportSta
 	resp.Diagnostics.Append(resp.State.Set(ctx, keysetModelFrom(*found))...)
 }
 
-func (r *keysetResource) findKeyset(ctx context.Context, id string) (*control.Keyset, error) {
-	keysets, err := r.client.ListKeysets(ctx, control.ListKeysetsOptions{ShowDisabled: true})
+func (r *keysetResource) findKeyset(ctx context.Context, id string) (*control.ZeroKMSKeyset, error) {
+	keysets, err := r.client.ListZeroKMSKeysets(ctx, control.ListZeroKMSKeysetsOptions{ShowDisabled: true})
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,7 @@ func (r *keysetResource) findKeyset(ctx context.Context, id string) (*control.Ke
 	return nil, nil
 }
 
-func keysetModelFrom(keyset control.Keyset) keysetModel {
+func keysetModelFrom(keyset control.ZeroKMSKeyset) keysetModel {
 	return keysetModel{
 		ID: types.StringValue(keyset.ID), Name: types.StringValue(keyset.Name), Description: types.StringValue(keyset.Description),
 		Enabled: types.BoolValue(!keyset.IsDisabled), IsDefault: types.BoolValue(keyset.IsDefault),

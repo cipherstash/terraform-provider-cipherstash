@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -28,7 +28,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 
 	crn := os.Getenv("TF_ACC_CRN")
 	workspace := os.Getenv("TF_ACC_WORKSPACE_ID")
-	require.True(t, workspace != "" && crn != "" && strings.HasSuffix(crn, ":"+workspace) && os.Getenv("CIPHERSTASH_ACCESS_KEY") != "", "set TF_ACC_WORKSPACE_ID, a matching TF_ACC_CRN and CIPHERSTASH_ACCESS_KEY for the explicitly approved acceptance workspace")
+	require.True(t, workspace != "" && crn != "" && strings.HasSuffix(crn, ":"+workspace) && os.Getenv("CS_CLIENT_ACCESS_KEY") != "", "set TF_ACC_WORKSPACE_ID, a matching TF_ACC_CRN and CS_CLIENT_ACCESS_KEY (an Admin key for actor creation) for the explicitly approved acceptance workspace")
 	p := New()
 	t.Cleanup(p.Close)
 	var schema frameworkprovider.SchemaResponse
@@ -44,7 +44,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 		ids := map[string]bool{}
 		cursor := ""
 		for {
-			page, err := api.ListActors(context.Background(), control.ListActorsOptions{Limit: 100, Cursor: cursor})
+			page, err := api.ListCTSActors(context.Background(), control.ListCTSActorsOptions{Limit: 100, Cursor: cursor})
 			if err != nil {
 				return nil, err
 			}
@@ -60,7 +60,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 			cursor = page.NextCursor
 		}
 
-		keys, err := api.ListAccessKeys(context.Background())
+		keys, err := api.ListCTSAccessKeys(context.Background())
 		if err != nil {
 			return nil, err
 		}
@@ -69,7 +69,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 			ids["key:"+key.ID] = true
 		}
 
-		clients, err := api.ListClients(context.Background(), control.ListClientsOptions{})
+		clients, err := api.ListZeroKMSClients(context.Background(), control.ListZeroKMSClientsOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -86,21 +86,22 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 	}
 
 	name := "tf-acc-" + strings.ToLower(rand.Text()[:12])
+	t.Logf("test-owned actor/client names in %s: %s and %s-v2", crn, name, name)
 	configuration := func(suffix, kind, role string) string {
 		return fmt.Sprintf(`
-provider "cipherstash" { crn = %q }
-resource "cipherstash_actor" "test" {
+provider "cipherstash" { workspace_crn = %q }
+resource "cipherstash_cts_actor" "test" {
   name = %q
   kind = %q
   role = %q
   token_expiry = 900
 }
-resource "cipherstash_client" "test" {
+resource "cipherstash_zerokms_client" "test" {
   name = %q
   description = %q
 }
-data "cipherstash_client" "test" {
-  id = cipherstash_client.test.id
+data "cipherstash_zerokms_client" "test" {
+  id = cipherstash_zerokms_client.test.id
 }
 `, crn, name+suffix, kind, role, name+suffix, "Terraform acceptance "+suffix)
 	}
@@ -109,14 +110,14 @@ data "cipherstash_client" "test" {
 	var actorSecret, clientSecret string
 	check := func(replaced bool) resource.TestCheckFunc {
 		return func(state *terraform.State) error {
-			actor := state.RootModule().Resources["cipherstash_actor.test"].Primary
-			client := state.RootModule().Resources["cipherstash_client.test"].Primary
-			lookup := state.RootModule().Resources["data.cipherstash_client.test"].Primary
+			actor := state.RootModule().Resources["cipherstash_cts_actor.test"].Primary
+			client := state.RootModule().Resources["cipherstash_zerokms_client.test"].Primary
+			lookup := state.RootModule().Resources["data.cipherstash_zerokms_client.test"].Primary
 			if lookup.ID != client.ID || lookup.Attributes["name"] != client.Attributes["name"] || lookup.Attributes["description"] != client.Attributes["description"] || lookup.Attributes["keyset_ids.#"] != "1" {
 				return fmt.Errorf("data source did not read the created client's metadata and grant")
 			}
 
-			if err := resource.TestCheckTypeSetElemAttrPair("data.cipherstash_client.test", "keyset_ids.*", "cipherstash_client.test", "keyset_id")(state); err != nil {
+			if err := resource.TestCheckTypeSetElemAttrPair("data.cipherstash_zerokms_client.test", "keyset_ids.*", "cipherstash_zerokms_client.test", "keyset_id")(state); err != nil {
 				return err
 			}
 
@@ -169,12 +170,12 @@ data "cipherstash_client" "test" {
 		Steps: []resource.TestStep{
 			{Config: configuration("", "app", "member"), Check: check(false)},
 			{Config: configuration("", "app", "member"), Check: check(false)},
-			{ResourceName: "cipherstash_actor.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"access_key", "token_expiry"}},
-			{ResourceName: "cipherstash_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key", "keyset_id"}},
+			{ResourceName: "cipherstash_cts_actor.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"access_key", "token_expiry"}},
+			{ResourceName: "cipherstash_zerokms_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key", "keyset_id"}},
 			{
-				ResourceName: "cipherstash_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key"},
+				ResourceName: "cipherstash_zerokms_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key"},
 				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					client := s.RootModule().Resources["cipherstash_client.test"].Primary
+					client := s.RootModule().Resources["cipherstash_zerokms_client.test"].Primary
 					return client.ID + "/" + client.Attributes["keyset_id"], nil
 				},
 			},

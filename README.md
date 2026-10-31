@@ -1,8 +1,12 @@
 # Terraform provider for CipherStash
 
-Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; this repository's native `internal/stack/auth` and `internal/stack/manage` packages handle authentication and service requests.
+Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; BNDRY's `github.com/bndry-co/bndry/pkg/cipherstash/auth` and `/manage` packages handle authentication and service requests.
 
-**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. A clean checkout builds with the pinned Go toolchain and module dependencies; no sibling SDK checkout, Go workspace, Rust toolchain or WebAssembly authentication guest is required. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
+**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. Fetching BNDRY's private module requires GitHub access. No Rust toolchain or WebAssembly authentication guest is required. See the pending dependency below and [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
+
+**Migration pending:** BNDRY's service-qualified management API and inventory-hardening fix must be published and pinned before using this migration against managed state. The current remote dependency predates the renamed API, so an unmodified checkout cannot build yet. Development verification uses a temporary module replacement pointing to the corrected local SDK; that is not a production dependency pin.
+
+The SDK names distinguish CTS authentication identities (`CTSActor`, `CreateCTSActor`, `ListCTSActors`) from ZeroKMS encryption identities and permissions (`ZeroKMSClient`, `ZeroKMSKeyset`, `CreateZeroKMSClient`, `GrantZeroKMSKeyset`). Options and creation results use matching names. The administrative `manage.Client`, credential export methods, environment variables and wire formats are unchanged. The old SDK API names have no compatibility aliases.
 
 ## Before you start
 
@@ -21,20 +25,25 @@ The linked CipherStash documentation explains the product concepts. This reposit
 
 ## Configure the provider
 
-Set `crn` to the workspace's [CipherStash Resource Name (CRN)](https://cipherstash.com/docs/reference/workspace/configuration), in the format `crn:<region>.aws:<workspace ID>`. The CRN identifies both the workspace and its region. The provider does not discover a workspace or read one from a saved profile or environment variable.
+Set `workspace_crn` or `CS_WORKSPACE_CRN` to the workspace's [CipherStash Resource Name (CRN)](https://cipherstash.com/docs/reference/workspace/configuration), in the format `crn:<region>.aws:<workspace ID>`. The CRN identifies both the workspace and its region. The provider does not discover a workspace or read a saved profile.
 
-Use an access key with the Admin role for the provider's administration operations. Create this credential outside the Terraform configuration that uses it: the provider cannot safely manage its own authentication credential. See the [provider reference](docs/index.md) for the credential arguments.
+Use a Control access key for management operations. Admin keys are also accepted, and the CTS API contract requires Admin for actor creation; a Control-only key does not promise access to every resource operation. Create this credential outside the Terraform configuration that uses it: the provider cannot safely manage its own authentication credential. See the [provider reference](docs/index.md) for the credential arguments.
 
 ```hcl
 provider "cipherstash" {
-  crn = var.crn
-  # Supply an Admin access key through CIPHERSTASH_ACCESS_KEY.
+  workspace_crn = var.workspace_crn
+  # Supply the credential through CS_CLIENT_ACCESS_KEY.
+  # Use an Admin key if this root creates actors.
 }
 ```
 
-Supply the key securely through `CIPHERSTASH_ACCESS_KEY` or the sensitive `access_key` argument. An omitted or null argument uses the environment variable. An empty string or a value that is unknown during provider configuration is an error, not a request to use the environment. These are the provider's credentials, not the application's `CS_CLIENT_*` configuration.
+Supply the key securely through `CS_CLIENT_ACCESS_KEY` or the sensitive `client_access_key` argument. For both `workspace_crn` and `client_access_key`, an omitted or null argument uses its environment variable. Explicit known values override the environment. Empty, unknown or malformed selected values fail without falling back to another source. Member-only credentials are rejected even though the environment variable is named `CS_CLIENT_ACCESS_KEY`.
 
-Native authentication verifies each exchanged token's RS256 signature against the CipherStash Token Service (CTS) signing keys, issuer, audience, expiry, workspace and Admin role. It also validates the advertised ZeroKMS endpoint before use. Each provider instance owns its token cache and authentication lifetime; reconfiguration and shutdown cancel token refresh. CTS and ZeroKMS still authorize each service request. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; the provider's Admin requirement does not mean your application needs Admin.
+This is a breaking configuration change: replace the provider's `crn` argument with `workspace_crn`, and `access_key` or `control_access_key` with `client_access_key`. Replace `CIPHERSTASH_ACCESS_KEY` or `CS_CONTROL_ACCESS_KEY` with `CS_CLIENT_ACCESS_KEY`. Old arguments are rejected and old environment names are ignored; there are no compatibility aliases. The actor resource's computed `access_key` and all client/keyset resource arguments are unchanged. The provider argument rename alone does not change resource state. These provider conventions do not change BNDRY worker or SDK environment conventions.
+
+`CS_CLIENT_ID` in BNDRY's `manage.Config` identifies an application encryption client, not an authentication principal. The provider neither requires nor reads it, and does not automatically grant that client access. Use `cipherstash_zerokms_keyset_grant` to manage explicit pairs. Application client keys remain separate from provider authentication.
+
+Native authentication verifies each exchanged token's RS256 signature against the CipherStash Token Service (CTS) signing keys, issuer, audience, expiry, workspace and Control or Admin role. It also validates the advertised ZeroKMS endpoint before use. Each provider instance owns its token cache and authentication lifetime; reconfiguration and shutdown cancel token refresh. CTS and ZeroKMS still authorize each service request. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; actor creation's Admin requirement does not mean your application needs Admin.
 
 ### Protect state and credentials
 
@@ -44,13 +53,17 @@ Use an encrypted state backend with restricted access. Protect backups and saved
 
 ## Choose what Terraform manages
 
+Names identify the owning service: `cts` means CipherStash Token Service, which manages actors and their authentication access keys; `zerokms` identifies encryption clients, keysets and grants. An actor's `access_key` and a ZeroKMS client's `client_key` are different credentials.
+
 | Resource or data source | What it manages | Change behavior |
 | --- | --- | --- |
-| [`cipherstash_actor`](docs/resources/actor.md) | A machine identity and its access key | Any argument change replaces the actor and creates a new key. |
-| [`cipherstash_client`](docs/resources/client.md) | A ZeroKMS client and its client key | Name/description changes replace the client; grants are not transferred. UUID-bound key seeding only updates Terraform state. |
-| [`cipherstash_keyset`](docs/resources/keyset.md) | A keyset's name, description, and enabled status | Updates the existing keyset. Destroy disables it; it does not delete key material. |
-| [`cipherstash_keyset_grant`](docs/resources/keyset_grant.md) | One client/keyset grant | Changing either ID replaces the grant. Destroy revokes only that pair. |
-| [`cipherstash_client` data source](docs/data-sources/client.md) | Read-only client metadata | Does not import, change, or delete the client or its grants. |
+| [`cipherstash_cts_actor`](docs/resources/cts_actor.md) | A machine identity and its access key | Any argument change replaces the actor and creates a new key. |
+| [`cipherstash_zerokms_client`](docs/resources/zerokms_client.md) | A ZeroKMS client and its client key | Name/description changes replace the client; grants are not transferred. UUID-bound key seeding only updates Terraform state. |
+| [`cipherstash_zerokms_keyset`](docs/resources/zerokms_keyset.md) | A keyset's name, description, and enabled status | Updates the existing keyset. Destroy disables it; it does not delete key material. |
+| [`cipherstash_zerokms_keyset_grant`](docs/resources/zerokms_keyset_grant.md) | One client/keyset grant | Changing either ID replaces the grant. Destroy revokes only that pair. |
+| [`cipherstash_zerokms_client` data source](docs/data-sources/zerokms_client.md) | Read-only client metadata | Does not import, change, or delete the client or its grants. |
+
+These names replace the earlier development types `cipherstash_actor`, `cipherstash_client`, `cipherstash_keyset` and `cipherstash_keyset_grant`. The old names are not registered, and there is no automatic cross-type state migration. If existing state uses the old types, retain the previous provider binary and protected state backups until you have planned a migration. Changing HCL type names alone does not migrate state. Import cannot recover creation-only credentials.
 
 Give each managed object one owner. For example, Terraform can manage a shared application keyset while a provisioning worker manages tenant keysets. Do not let the worker and Terraform manage the same keyset or grant pair. This provider has no workspace or human-membership resources.
 
@@ -58,9 +71,9 @@ Give each managed object one owner. For example, Terraform can manage a shared a
 
 A new ZeroKMS client receives a grant to the workspace's default keyset. The client resource manages identity, not grants. Its deprecated, computed `keyset_id` records historical creation or import metadata, not current access; you cannot configure that argument. Refresh preserves this value and the client key even if the historical grant disappears or the client has no grants.
 
-Use `cipherstash_keyset_grant` to manage any grant explicitly, including the automatic default grant. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state.
+Use `cipherstash_zerokms_keyset_grant` to manage any grant explicitly, including the automatic default grant. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state.
 
-Client refresh and import never add, restore or revoke grants. Use the existing `cipherstash_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
+Client refresh and import never add, restore or revoke grants. Use the existing `cipherstash_zerokms_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
 
 Replacing a client creates a different identity. Grants associated with the old client are not transferred to it. Plan credential and grant changes separately; consider `lifecycle { prevent_destroy = true }` for an established client. This provider does not implement an application cutover or prove that deleting a client physically removes every grant record on the service.
 
@@ -69,7 +82,7 @@ Replacing a client creates a different identity. Grants associated with the old 
 Use the client data source when you need metadata without taking ownership:
 
 ```hcl
-data "cipherstash_client" "api" {
+data "cipherstash_zerokms_client" "api" {
   id = "11111111-1111-4111-8111-111111111111" # Replace with your existing client ID.
 }
 ```
@@ -97,7 +110,7 @@ Import brings an existing object under Terraform management; it does not recover
 
 The example IDs are placeholders. To keep an imported actor or client, use its previously saved credential from your secret store. To obtain a new credential, replace the resource and plan the change for its consumers.
 
-Existing development state needs no manual editing or schema upgrade: the client ID, client key and computed string `keyset_id` retain their representation and saved values. Old UUID-only imports that previously selected one grant keep that historical value; new UUID-only imports do not select a grant. A legacy pair import validates both UUIDs and the client's existence, but does not validate the keyset or grant. Import the pair separately as a `cipherstash_keyset_grant` if Terraform should own that permission.
+The client ID, client key and computed string `keyset_id` retain their attribute representations; the resource type rename is a separate breaking change as described above. Within the current resource type, refresh preserves historical `keyset_id` values, while new UUID-only imports do not select a grant. A legacy pair import validates both UUIDs and the client's existence, but does not validate the keyset or grant. Import the pair separately as a `cipherstash_zerokms_keyset_grant` if Terraform should own that permission.
 
 ### Record an existing client key after import
 
@@ -109,7 +122,7 @@ variable "existing_client_key" {
   sensitive = true
 }
 
-resource "cipherstash_client" "api" {
+resource "cipherstash_zerokms_client" "api" {
   name                 = "existing-name"
   description          = "existing-description"
   client_key_client_id = "11111111-1111-4111-8111-111111111111" # The UUID you imported.
@@ -129,7 +142,7 @@ Terraform's `ignore_changes` has its normal semantics. An ignored key change ret
 
 ### Disable or stop managing a keyset
 
-`cipherstash_keyset` creates a keyset without a client or grant and never exports its key material. Name, description, and enabled-status changes update the same keyset without rotating key material. The metadata and enabled-status requests are separate operations, not a transaction. Terraform records successful steps and the values returned by a follow-up read, including after a failed write.
+`cipherstash_zerokms_keyset` creates a keyset without a client or grant and never exports its key material. Name, description, and enabled-status changes update the same keyset without rotating key material. The metadata and enabled-status requests are separate operations, not a transaction. Terraform records successful steps and the values returned by a follow-up read, including after a failed write.
 
 Destroy disables the keyset, confirms that it is disabled or absent, and removes it from state. The keyset and key material remain in CipherStash. An already-disabled keyset needs no write. A failed disable, failed follow-up read, or still-enabled result returns an error and retains state. Disabling can interrupt every client using the keyset, including clients with worker-managed grants; the grants themselves remain.
 
@@ -149,7 +162,15 @@ A grant's ID is known before the request because it is the client/keyset pair. A
 
 ### Live verification limits
 
-**Keyset and grant lifecycles have not been verified against the live service.** Local fixture tests are not proof that these operations work live. Earlier Admin and Control grant/revoke and re-grant probes returned HTTP 500 with the existing default grant unchanged. Live keyset tests need separate approval because this provider cannot delete the resulting keyset.
+**Live API probes are not full Terraform keyset/grant lifecycle verification.** On 2026-10-30, isolated Development probes created, enabled and disabled a test keyset, and successfully added and revoked an additional grant while the client's creation/default grant remained. Revoking the creation/default grant while another grant remained returned HTTP 500. Revoking a final grant to a non-workspace-default keyset also returned HTTP 500; that keyset was the client's creation keyset. Inventory confirmed both failed revocations left the grants present. The cause remains unresolved; these observations do not establish that all revokes fail or that removing only the last grant is the problem. No provider workaround is justified by this evidence.
+
+Those probes deleted their test clients and preserved existing resources. Test keyset `9fc1fcf6-da8a-4b8f-abdc-aae2405d6651` remains disabled because keysets cannot be deleted. Do not rely on creation-grant removal as part of an automated lifecycle until the failure is resolved. Exercise the actual Terraform keyset/grant lifecycle before production use; the successful API probes do not replace that check.
+
+Before the BNDRY migration, on 2026-10-30, the native-backed actor/client acceptance test passed creation, refresh, UUID and legacy-pair imports, replacement and deletion in workspace `2JTSJCX24VP2WCBC`. Actor, access-key and client IDs matched the pre-test baseline afterward. A subsequent direct `internal/stack` client test verified Admin authentication, client creation, metadata and grant inventory, filtering, one-time key export and deletion. Go and the published Rust protocol decoder accepted the live inventories, including scalar and array grant representations. Complete client/keyset inventories matched that run's baseline afterward: two clients and nine keysets, eight disabled. No new lasting resource was created by that run.
+
+The BNDRY-backed provider repeated the actor/client Terraform acceptance test on 2026-10-30 in Development workspace `2JTSJCX24VP2WCBC`, using a temporary module replacement for the local inventory-hardening fix. Creation, refresh, UUID and legacy-pair imports, replacement and deletion passed; actor, access-key and client IDs matched the baseline afterward. This run did not repeat the keyset/grant lifecycle or validate a published dependency containing that fix.
+
+Live zero-grant inventory representation remains unverified. Offline Terraform CLI tests cover zero-grant import and refresh; accepting an empty array in a fixture is not live evidence. None of these checks establishes immediate credential invalidation after deletion; see the actor-key observation above. Client-key seeding checks format and the asserted UUID, not cryptographic key/client correspondence.
 
 ### Preserve existing configuration
 
@@ -157,7 +178,9 @@ The repository's example configurations have been removed. If you used them, pre
 
 ## Develop and verify locally
 
-Install [mise](https://mise.jdx.dev/). `mise.toml` pins Go 1.26.10 and Terraform 1.14.6 and sets `GOWORK=off`, so builds and tests use only this repository's module dependencies.
+Install [mise](https://mise.jdx.dev/). `mise.toml` pins Go 1.27.3 (required by BNDRY's module) and Terraform 1.14.6 and sets `GOWORK=off`, so builds and tests use only this repository's module dependencies. It marks `github.com/bndry-co/*` private with `GOPRIVATE`; configure Git authentication with read access to BNDRY before fetching dependencies. The versioned replacements in `go.mod` resolve BNDRY's workspace-only placeholder versions to real commits, not local checkouts.
+
+The commands below require the pending SDK publication and dependency-pin update described above. Until then, local verification must explicitly select the corrected SDK through a temporary module file; do not commit a local replacement or treat its binary as a published provider.
 
 ```sh
 mise trust
@@ -167,7 +190,7 @@ mise run install-local
 export TF_CLI_CONFIG_FILE="$PWD/.local/terraform.rc"
 ```
 
-These commands check and install the provider locally without creating CipherStash resources. Use your own Terraform root with the local provider address and version above. To plan against a workspace, supply its Admin access key securely through `CIPHERSTASH_ACCESS_KEY`; do not put the key in shell history or committed variable files. Review the plan and coordinate shared-workspace access before any apply.
+These commands check and install the provider locally without creating CipherStash resources. Use your own Terraform root with the local provider address and version above. To plan against a workspace, supply its Control or Admin access key securely through `CS_CLIENT_ACCESS_KEY`; do not put the key in shell history or committed variable files. Review the plan and coordinate shared-workspace access before any apply.
 
 A lockfile generated from the local mirror describes your local build, not a published provider. After rebuilding changed source, refresh that root's provider checksum with `terraform providers lock -fs-mirror=<provider checkout>/.local/mirror terraform.local/cipherstash/cipherstash` before initializing again. Do not use this development-version process for a production lockfile.
 
@@ -203,7 +226,7 @@ Separate live checks verified that client creation without a specified keyset gr
 
 ### Run approved live acceptance tests
 
-Live actor/client tests use `terraform-plugin-testing`. Coordinate access to the shared workspace and explicitly set `TF_ACC=1`, `TF_ACC_WORKSPACE_ID`, a matching `TF_ACC_CRN`, and `CIPHERSTASH_ACCESS_KEY`. Then run `mise run test:acc`.
+Live actor/client tests use `terraform-plugin-testing`. Coordinate access to the shared workspace and explicitly set `TF_ACC=1`, `TF_ACC_WORKSPACE_ID`, a matching `TF_ACC_CRN`, and `CS_CLIENT_ACCESS_KEY` containing an Admin key for actor creation. Then run `mise run test:acc`.
 
 There is no default acceptance workspace. The task refuses to run without opt-in, and the test rejects a missing workspace ID, mismatched CRN, or missing credential before opening authentication. It creates uniquely named `tf-acc-*` actors and clients, checks refresh/import/replacement, destroys them, and compares actor, access-key, and client IDs against the initial inventory. It does not separately mutate keysets or grants.
 

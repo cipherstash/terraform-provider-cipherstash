@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/auth"
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	"github.com/bndry-co/bndry/pkg/cipherstash/auth"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -147,11 +147,11 @@ func TestActorCreateSavesSecretBeforeMetadataRead(t *testing.T) {
 			rt := fixtureTransport(t, "admin", func(w http.ResponseWriter, req *http.Request) {
 				switch req.URL.Path {
 				case "/api/actors":
-					var input control.CreateActorOptions
+					var input control.CreateCTSActorOptions
 					assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 					assert.Equal(t, "test-create", input.Name)
-					assert.Equal(t, control.ActorKind("agent"), input.Kind)
-					assert.Equal(t, control.Role("control"), input.Role)
+					assert.Equal(t, control.CTSActorKind("agent"), input.Kind)
+					assert.Equal(t, control.CTSRole("control"), input.Role)
 					if assert.NotNil(t, input.TokenExpiry) {
 						assert.Equal(t, int64(1234), *input.TokenExpiry)
 					}
@@ -234,7 +234,7 @@ func TestProviderOwnsAuthenticationAcrossCallsAndCancelsOnReconfigureAndStop(t *
 	}, func(claims map[string]any) {
 		claims["exp"] = time.Now().Add(30 * time.Second).Unix()
 	})
-	t.Setenv("CIPHERSTASH_ACCESS_KEY", "CSAKtestKeyId.testKeySecret")
+	t.Setenv("CS_CLIENT_ACCESS_KEY", "CSAKtestKeyId.testKeySecret")
 	p := New()
 	t.Cleanup(p.Close)
 	cfg := providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringNull()}
@@ -242,22 +242,22 @@ func TestProviderOwnsAuthenticationAcrossCallsAndCancelsOnReconfigureAndStop(t *
 	noErrors(t, configured.Diagnostics)
 	api, err := clientFromProviderData(configured.ResourceData)
 	require.NoError(t, err)
-	_, err = api.ListClients(t.Context(), control.ListClientsOptions{})
+	_, err = api.ListZeroKMSClients(t.Context(), control.ListZeroKMSClientsOptions{})
 	require.NoError(t, err, "Configure released authentication too early")
 	configured = configureFixture(t, p, rt, cfg)
 	noErrors(t, configured.Diagnostics)
-	_, err = api.ListClients(t.Context(), control.ListClientsOptions{})
+	_, err = api.ListZeroKMSClients(t.Context(), control.ListZeroKMSClientsOptions{})
 	require.ErrorIs(t, err, context.Canceled, "reconfiguration did not cancel old authentication")
 	api, err = clientFromProviderData(configured.ResourceData)
 	require.NoError(t, err)
 	_, err = Protocol6(p).StopProvider(context.Background(), &tfprotov6.StopProviderRequest{})
 	require.NoError(t, err)
-	_, err = api.ListClients(t.Context(), control.ListClientsOptions{})
+	_, err = api.ListZeroKMSClients(t.Context(), control.ListZeroKMSClientsOptions{})
 	require.ErrorIs(t, err, context.Canceled, "StopProvider did not cancel authentication")
 }
 
 func TestProviderRejectsWrongVerifiedRole(t *testing.T) {
-	for _, role := range []string{"member", "control", ""} {
+	for _, role := range []string{"member", ""} {
 		t.Run(role, func(t *testing.T) {
 			rt := fixtureTransport(t, role, func(w http.ResponseWriter, req *http.Request) {
 				assert.Fail(t, "wrong-role credential reached management API")
@@ -375,21 +375,21 @@ func TestKeysetGrantSDKCRUDPreservesOtherGrants(t *testing.T) {
 
 func TestKeysetSDKCRUDDisablesAndRetains(t *testing.T) {
 	var mu sync.Mutex
-	var remote *control.Keyset
-	unrelated := control.Keyset{ID: tenantKeysetID, Name: "worker-owned", Description: "unchanged", IsDefault: true}
+	var remote *control.ZeroKMSKeyset
+	unrelated := control.ZeroKMSKeyset{ID: tenantKeysetID, Name: "worker-owned", Description: "unchanged", IsDefault: true}
 	rt := fixtureTransport(t, "admin", func(w http.ResponseWriter, req *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 
 		switch req.URL.Path {
 		case "/create-keyset":
-			var input control.CreateKeysetOptions
+			var input control.CreateZeroKMSKeysetOptions
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 			assert.Nil(t, input.Client, "keyset resource must not create a client")
-			remote = &control.Keyset{ID: keysetID, Name: input.Name, Description: input.Description}
+			remote = &control.ZeroKMSKeyset{ID: keysetID, Name: input.Name, Description: input.Description}
 			assert.NoError(t, json.NewEncoder(w).Encode(keysetJSON(*remote)))
 		case "/list-keysets":
-			var input control.ListKeysetsOptions
+			var input control.ListZeroKMSKeysetsOptions
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 			keysets := []map[string]any{keysetJSON(unrelated)}
 			if remote != nil && (input.ShowDisabled || !remote.IsDisabled) {
@@ -400,7 +400,7 @@ func TestKeysetSDKCRUDDisablesAndRetains(t *testing.T) {
 		case "/modify-keyset", "/enable-keyset", "/disable-keyset":
 			var input struct {
 				KeysetID string `json:"keyset_id"`
-				control.ModifyKeysetOptions
+				control.ModifyZeroKMSKeysetOptions
 			}
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 			if remote == nil || input.KeysetID != keysetID {

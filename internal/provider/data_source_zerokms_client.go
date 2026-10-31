@@ -3,7 +3,7 @@ package provider
 import (
 	"context"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -27,7 +27,7 @@ type clientDataModel struct {
 }
 
 func (d *clientDataSource) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_client"
+	resp.TypeName = req.ProviderTypeName + "_zerokms_client"
 }
 
 func (d *clientDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
@@ -77,7 +77,7 @@ func (d *clientDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		return
 	}
 
-	clients, err := d.client.ListClients(ctx, control.ListClientsOptions{})
+	clients, err := d.client.ListZeroKMSClients(ctx, control.ListZeroKMSClientsOptions{})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot read client", operationError(err))
 		return

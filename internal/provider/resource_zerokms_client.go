@@ -16,7 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 )
 
 type clientResource struct {
@@ -41,12 +41,12 @@ type clientModel struct {
 }
 
 func (r *clientResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_client"
+	resp.TypeName = req.ProviderTypeName + "_zerokms_client"
 }
 
 func (r *clientResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Create a ZeroKMS client and its client key in the configured workspace. This is a registered application client, not an SDK encryption-client object. Its client key is the application-held half of CipherStash's split key architecture.\n\nA new client receives access to the workspace's default keyset. This resource manages the client identity, not its grants. Import existing pairs into `cipherstash_keyset_grant` to manage them explicitly, including the automatic default grant. Refresh and import never change grants, and a client remains managed even with no grants. Changing name or description replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.\n\nThe client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import by client UUID with zero, one or many grants; `keyset_id` is null for these imports. Legacy `client UUID/keyset UUID` imports retain the second UUID as historical metadata only, without checking or managing that grant. Use the `cipherstash_client` data source's `keyset_ids` for current grant inventory.\n\nAfter import, you may supply an existing `client_key` with an explicit `client_key_client_id` matching the managed UUID. Applying records the key in state without a CipherStash write; it does not rotate a key or change grants. The provider checks key format, UUID equality and client existence, not cryptographic ownership. Verify the key/client pairing separately. A different persisted key is rejected. Both inputs must be known during planning. Creation and replacement are rejected while either seed argument is configured. Remove both arguments before intentional replacement; removal alone retains the key in state. Terraform's `ignore_changes` applies normally: ignored key changes retain state, rather than being adopted or rejected. No import provenance is inferred from a null key.",
+		Description: "Create a ZeroKMS client and its client key in the configured workspace. This is a registered application client, not an SDK encryption-client object. Its client key is the application-held half of CipherStash's split key architecture.\n\nA new client receives access to the workspace's default keyset. This resource manages the client identity, not its grants. Import existing pairs into `cipherstash_zerokms_keyset_grant` to manage them explicitly, including the automatic default grant. Refresh and import never change grants, and a client remains managed even with no grants. Changing name or description replaces the client and creates a new client key. Existing grants are not transferred to the replacement; plan the credential and grant changes before replacing a client. Creating a replacement does not establish when the old credential stops working.\n\nThe client key value is returned only at creation and stored in Terraform state and saved plans despite being marked sensitive. Import cannot recover it. Import by client UUID with zero, one or many grants; `keyset_id` is null for these imports. Legacy `client UUID/keyset UUID` imports retain the second UUID as historical metadata only, without checking or managing that grant. Use the `cipherstash_zerokms_client` data source's `keyset_ids` for current grant inventory.\n\nAfter import, you may supply an existing `client_key` with an explicit `client_key_client_id` matching the managed UUID. Applying records the key in state without a CipherStash write; it does not rotate a key or change grants. The provider checks key format, UUID equality and client existence, not cryptographic ownership. Verify the key/client pairing separately. A different persisted key is rejected. Both inputs must be known during planning. Creation and replacement are rejected while either seed argument is configured. Remove both arguments before intentional replacement; removal alone retains the key in state. Terraform's `ignore_changes` applies normally: ignored key changes retain state, rather than being adopted or rejected. No import provenance is inferred from a null key.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -66,7 +66,7 @@ func (r *clientResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"keyset_id": schema.StringAttribute{
 				Computed:           true,
 				Description:        "Deprecated historical metadata: the default keyset ID returned at creation, or the second UUID supplied to a legacy pair import. Existing state values are preserved even if the grant disappears. Null for new UUID-only imports, regardless of grant count. This value is computed, not configurable, and does not describe current access or imply grant ownership.",
-				DeprecationMessage: "Use the cipherstash_client data source's keyset_ids for current grants and cipherstash_keyset_grant to manage individual pairs. keyset_id is historical metadata only.",
+				DeprecationMessage: "Use the cipherstash_zerokms_client data source's keyset_ids for current grants and cipherstash_zerokms_keyset_grant to manage individual pairs. keyset_id is historical metadata only.",
 				PlanModifiers:      []planmodifier.String{stringplanmodifier.UseStateForUnknown()},
 			},
 			"client_key": schema.StringAttribute{
@@ -225,7 +225,7 @@ func (r *clientResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	created, err := r.client.CreateClient(ctx, control.CreateClientOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
+	created, err := r.client.CreateZeroKMSClient(ctx, control.CreateZeroKMSClientOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot create client", operationError(err))
 		return
@@ -310,7 +310,7 @@ func (r *clientResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		return
 	}
 
-	if err := r.client.DeleteClient(ctx, state.ID.ValueString()); err != nil && !errors.Is(err, control.ErrNotFound) {
+	if err := r.client.DeleteZeroKMSClient(ctx, state.ID.ValueString()); err != nil && !errors.Is(err, control.ErrNotFound) {
 		resp.Diagnostics.AddError("Cannot delete client", operationError(err))
 	}
 }
@@ -353,8 +353,8 @@ func (r *clientResource) ImportState(ctx context.Context, req resource.ImportSta
 	})...)
 }
 
-func (r *clientResource) findClient(ctx context.Context, id string) (*control.EncryptionClient, error) {
-	clients, err := r.client.ListClients(ctx, control.ListClientsOptions{})
+func (r *clientResource) findClient(ctx context.Context, id string) (*control.ZeroKMSClient, error) {
+	clients, err := r.client.ListZeroKMSClients(ctx, control.ListZeroKMSClientsOptions{})
 	if err != nil {
 		return nil, err
 	}

@@ -8,8 +8,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/auth"
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	"github.com/bndry-co/bndry/pkg/cipherstash/auth"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
@@ -28,8 +28,8 @@ type Provider struct {
 func New() *Provider { return &Provider{} }
 
 type providerModel struct {
-	CRN       types.String `tfsdk:"crn"`
-	AccessKey types.String `tfsdk:"access_key"`
+	CRN       types.String `tfsdk:"workspace_crn"`
+	AccessKey types.String `tfsdk:"client_access_key"`
 }
 
 func (p *Provider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
@@ -38,10 +38,10 @@ func (p *Provider) Metadata(_ context.Context, _ provider.MetadataRequest, resp 
 
 func (p *Provider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Use the CipherStash provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a workspace. Configure a separate provider instance for each workspace. See the [workspace documentation](https://cipherstash.com/docs/reference/workspace) for the CipherStash concepts.\n\nThis provider is in development and is not published to the Terraform Registry. Local builds use the native Go authentication and management packages in this repository; no separate SDK checkout or WebAssembly guest is required. Provider licensing remains unresolved.\n\nAuthenticate with an access key that has the Admin role. Create this credential outside the Terraform configuration that uses it. Resource access keys and client key values are stored in Terraform state and saved plans, even when marked sensitive. Protect these files and your state backend.",
+		Description: "Use the CipherStash provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a workspace. Configure a separate provider instance for each workspace. See the [workspace documentation](https://cipherstash.com/docs/reference/workspace) for the CipherStash concepts.\n\nThis provider is in development and is not published to the Terraform Registry. Local builds use BNDRY's native Go authentication and management packages; fetching the private module requires GitHub access. The service-qualified management API and inventory-hardening fix must be published and pinned before a clean checkout can build. Until then, development verification requires an explicit temporary replacement with the corrected local SDK. No WebAssembly guest is required. Provider licensing remains unresolved.\n\nAuthenticate with a Control access key; Admin keys are also accepted and actor creation requires Admin according to the CTS API contract. Successful configuration does not prove permission for every operation. Create this credential outside the Terraform configuration that uses it. Resource access keys and client key values are stored in Terraform state and saved plans, even when marked sensitive. Protect these files and your state backend.\n\nThe provider does not read CS_CLIENT_ID: this SDK configuration field identifies an application encryption client, not an authentication principal. Manage client/keyset pairs explicitly with cipherstash_zerokms_keyset_grant.",
 		Attributes: map[string]schema.Attribute{
-			"crn":        schema.StringAttribute{Required: true, Description: "CipherStash Resource Name (CRN) of the workspace, in the format `crn:<region>.aws:<workspace ID>`. Set this explicitly; the provider does not read it from an environment variable or saved profile."},
-			"access_key": schema.StringAttribute{Optional: true, Sensitive: true, Description: "Access key with the Admin role for this workspace. Omit this argument or set it to null to use `CIPHERSTASH_ACCESS_KEY`. Empty strings and values that are unknown during provider configuration are rejected. Native authentication verifies the token's signature, issuer, audience, expiry, workspace and Admin role before using it. CipherStash services authorize each request."},
+			"workspace_crn":     schema.StringAttribute{Optional: true, Description: "CipherStash Resource Name (CRN) of the workspace, in the format `crn:<region>.aws:<workspace ID>`. Omit this argument or set it to null to use `CS_WORKSPACE_CRN`. Explicit known values override the environment. Empty, unknown or malformed selected values are rejected without fallback; no saved profile is read. The old `crn` argument is not supported."},
+			"client_access_key": schema.StringAttribute{Optional: true, Sensitive: true, Description: "Access key with the Control or Admin role for this workspace; actor creation requires Admin. Omit this argument or set it to null to use `CS_CLIENT_ACCESS_KEY`. Explicit known values override the environment. Empty, unknown or malformed selected values are rejected without fallback. The old `access_key` and `control_access_key` arguments are not supported; `CS_CONTROL_ACCESS_KEY` and `CIPHERSTASH_ACCESS_KEY` are ignored. Native authentication verifies the token's signature, issuer, audience, expiry, workspace and Control or Admin role before using it. Member-only credentials are rejected. CipherStash services authorize each request."},
 		},
 	}
 }
@@ -58,20 +58,25 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		return
 	}
 
-	if cfg.CRN.IsUnknown() || cfg.CRN.IsNull() || cfg.CRN.ValueString() == "" {
-		resp.Diagnostics.AddAttributeError(path.Root("crn"), "Workspace CRN required", "Set an explicit, known workspace CRN before configuring this provider.")
+	crnText := cfg.CRN.ValueString()
+	if cfg.CRN.IsNull() {
+		crnText = os.Getenv("CS_WORKSPACE_CRN")
+	}
+
+	if cfg.CRN.IsUnknown() || crnText == "" {
+		resp.Diagnostics.AddAttributeError(path.Root("workspace_crn"), "Workspace CRN required", "Set workspace_crn or CS_WORKSPACE_CRN to a known workspace CRN. Explicit empty or unknown values do not use the environment fallback.")
 	}
 
 	keyText := cfg.AccessKey.ValueString()
 	if cfg.AccessKey.IsUnknown() {
-		resp.Diagnostics.AddAttributeError(path.Root("access_key"), "Unknown access key", "The access key must be known before configuring this provider. Unknown values do not use the environment fallback.")
+		resp.Diagnostics.AddAttributeError(path.Root("client_access_key"), "Unknown access key", "The access key must be known before configuring this provider. Unknown values do not use the environment fallback.")
 	} else {
 		if cfg.AccessKey.IsNull() {
-			keyText = os.Getenv("CIPHERSTASH_ACCESS_KEY")
+			keyText = os.Getenv("CS_CLIENT_ACCESS_KEY")
 		}
 
 		if keyText == "" {
-			resp.Diagnostics.AddAttributeError(path.Root("access_key"), "Admin access key required", "Set access_key or CIPHERSTASH_ACCESS_KEY. Bootstrap this credential outside this Terraform root.")
+			resp.Diagnostics.AddAttributeError(path.Root("client_access_key"), "Client access key required", "Set client_access_key or CS_CLIENT_ACCESS_KEY to a Control or Admin key. Bootstrap this credential outside this Terraform root; actor creation requires Admin.")
 		}
 	}
 
@@ -79,15 +84,15 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		return
 	}
 
-	crn, err := auth.ParseCRN(cfg.CRN.ValueString())
+	crn, err := auth.ParseCRN(crnText)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("crn"), "Invalid workspace CRN", "Use a workspace CRN with a supported region and a 16-character workspace ID.")
+		resp.Diagnostics.AddAttributeError(path.Root("workspace_crn"), "Invalid workspace CRN", "Use a workspace CRN with a supported region and a 16-character workspace ID.")
 		return
 	}
 
-	key, err := auth.ParseAdminAccessKey(keyText)
+	key, err := auth.ParseControlAccessKey(keyText)
 	if err != nil {
-		resp.Diagnostics.AddAttributeError(path.Root("access_key"), "Invalid access key", "Use an Admin access key with the CSAK prefix and an ID and secret separated by a dot.")
+		resp.Diagnostics.AddAttributeError(path.Root("client_access_key"), "Invalid access key", "Use a Control or Admin access key with the CSAK prefix and an ID and secret separated by a dot.")
 		return
 	}
 
@@ -105,7 +110,7 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 
 	if err != nil {
 		cancel()
-		resp.Diagnostics.AddError("Cannot authenticate with CipherStash", "Could not verify an Admin token for the configured workspace. Check the CRN, credential and service connectivity.")
+		resp.Diagnostics.AddError("Cannot authenticate with CipherStash", "Could not verify a Control or Admin token for the configured workspace. Check the CRN, credential and service connectivity.")
 
 		return
 	}
@@ -167,20 +172,20 @@ func (s *protocolServer) StopProvider(ctx context.Context, req *tfprotov6.StopPr
 // This boundary is exactly the native operations used by resource reconciliation;
 // tests can inject failures without a second HTTP/authentication implementation.
 type controlClient interface {
-	CreateActor(context.Context, control.CreateActorOptions) (*control.CreatedActor, error)
-	ListActors(context.Context, control.ListActorsOptions) (control.ActorPage, error)
-	DeleteActor(context.Context, string) error
-	ListAccessKeys(context.Context) ([]control.AccessKeyMetadata, error)
-	CreateClient(context.Context, control.CreateClientOptions) (*control.CreatedClient, error)
-	ListClients(context.Context, control.ListClientsOptions) ([]control.EncryptionClient, error)
-	DeleteClient(context.Context, string) error
-	GrantKeyset(context.Context, string, string) error
-	RevokeKeyset(context.Context, string, string) error
-	CreateKeyset(context.Context, control.CreateKeysetOptions) (*control.CreatedKeyset, error)
-	ListKeysets(context.Context, control.ListKeysetsOptions) ([]control.Keyset, error)
-	ModifyKeyset(context.Context, string, control.ModifyKeysetOptions) error
-	EnableKeyset(context.Context, string) error
-	DisableKeyset(context.Context, string) error
+	CreateCTSActor(context.Context, control.CreateCTSActorOptions) (*control.CreatedCTSActor, error)
+	ListCTSActors(context.Context, control.ListCTSActorsOptions) (control.CTSActorPage, error)
+	DeleteCTSActor(context.Context, string) error
+	ListCTSAccessKeys(context.Context) ([]control.CTSAccessKeyMetadata, error)
+	CreateZeroKMSClient(context.Context, control.CreateZeroKMSClientOptions) (*control.CreatedZeroKMSClient, error)
+	ListZeroKMSClients(context.Context, control.ListZeroKMSClientsOptions) ([]control.ZeroKMSClient, error)
+	DeleteZeroKMSClient(context.Context, string) error
+	GrantZeroKMSKeyset(context.Context, string, string) error
+	RevokeZeroKMSKeyset(context.Context, string, string) error
+	CreateZeroKMSKeyset(context.Context, control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error)
+	ListZeroKMSKeysets(context.Context, control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error)
+	ModifyZeroKMSKeyset(context.Context, string, control.ModifyZeroKMSKeysetOptions) error
+	EnableZeroKMSKeyset(context.Context, string) error
+	DisableZeroKMSKeyset(context.Context, string) error
 }
 
 func clientFromProviderData(data any) (controlClient, error) {
@@ -200,9 +205,9 @@ func clientFromProviderData(data any) (controlClient, error) {
 func operationError(err error) string {
 	switch {
 	case errors.Is(err, control.ErrForbidden):
-		return "CipherStash denied this operation. Check the Admin credential and its permissions."
+		return "CipherStash denied this operation. Check the credential and its permissions; actor creation requires Admin."
 	case errors.Is(err, control.ErrAuthentication):
-		return "CipherStash authentication failed. Check the Admin credential and workspace CRN."
+		return "CipherStash authentication failed. Check the Control or Admin credential and workspace CRN."
 	case errors.Is(err, control.ErrConflict):
 		return "CipherStash reports a conflicting resource. Import the existing object or choose a different name."
 	case errors.Is(err, control.ErrNotFound):

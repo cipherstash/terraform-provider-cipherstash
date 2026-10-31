@@ -1,9 +1,10 @@
 [tools]
-go = "1.26.10"
+go = "1.27.3"
 terraform = "1.14.6"
 
 [env]
 GOWORK = "off"
+GOPRIVATE = "github.com/bndry-co/*"
 
 [tasks.build]
 description = "Build the local provider binary"

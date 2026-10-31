@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -35,13 +35,13 @@ type keysetGrantModel struct {
 }
 
 func (r *keysetGrantResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
-	resp.TypeName = req.ProviderTypeName + "_keyset_grant"
+	resp.TypeName = req.ProviderTypeName + "_zerokms_keyset_grant"
 }
 
 func (r *keysetGrantResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	uuidValidator := stringvalidator.RegexMatches(regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`), "must be a lowercase UUID")
 	resp.Schema = schema.Schema{
-		Description: "Grant a ZeroKMS client access to one keyset. This resource manages a single client/keyset pair, not the client's full set of grants. Your application must still select the keyset in its SDK configuration.\n\nDestroy revokes only this grant; it does not delete the client or keyset, or change other grants. Changing either ID replaces the grant without transferring any other grants.\n\nGive each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. This includes the automatic default-keyset grant of a `cipherstash_client`: the client resource manages identity only and does not require that grant to remain present.\n\nLocal tests cover this resource, but its lifecycle has not been verified against the live service. Earlier live grant and revoke probes returned HTTP 500 with the default grant unchanged.",
+		Description: "Grant a ZeroKMS client access to one keyset. This resource manages a single client/keyset pair, not the client's full set of grants. Your application must still select the keyset in its SDK configuration.\n\nDestroy revokes only this grant; it does not delete the client or keyset, or change other grants. Changing either ID replaces the grant without transferring any other grants.\n\nGive each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. This includes the automatic default-keyset grant of a `cipherstash_zerokms_client`: the client resource manages identity only and does not require that grant to remain present.\n\nLive Development API probes added and revoked an additional grant while the creation/default grant remained. Revoking the creation/default grant with another grant present returned HTTP 500, as did revoking a final grant to a nondefault keyset that was the client's creation keyset. Inventory confirmed those failed revocations left grants present. The cause is unresolved; do not rely on creation-grant removal in an automated lifecycle. Full Terraform keyset/grant lifecycle verification and live zero-grant inventory evidence remain outstanding. Inventory absence does not prove immediate credential invalidation. See the README's live verification limits.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -92,7 +92,7 @@ func (r *keysetGrantResource) Create(ctx context.Context, req resource.CreateReq
 		return
 	}
 
-	writeErr := r.client.GrantKeyset(ctx, plan.KeysetID.ValueString(), plan.ClientID.ValueString())
+	writeErr := r.client.GrantZeroKMSKeyset(ctx, plan.KeysetID.ValueString(), plan.ClientID.ValueString())
 	plan.ID = types.StringValue(plan.ClientID.ValueString() + "/" + plan.KeysetID.ValueString())
 	// The identity is known even if the write response was lost. Keep it before
 	// readback so a failed read cannot discard a potentially created grant.
@@ -157,7 +157,7 @@ func (r *keysetGrantResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
-	writeErr := r.client.RevokeKeyset(ctx, state.KeysetID.ValueString(), state.ClientID.ValueString())
+	writeErr := r.client.RevokeZeroKMSKeyset(ctx, state.KeysetID.ValueString(), state.ClientID.ValueString())
 	exists, readErr := r.hasGrant(ctx, state)
 	if readErr != nil {
 		resp.Diagnostics.AddError("Cannot confirm grant revocation", operationError(readErr)+" State is retained because the pair's absence could not be confirmed.")
@@ -210,7 +210,7 @@ func (r *keysetGrantResource) ImportState(ctx context.Context, req resource.Impo
 }
 
 func (r *keysetGrantResource) hasGrant(ctx context.Context, state keysetGrantModel) (bool, error) {
-	clients, err := r.client.ListClients(ctx, control.ListClientsOptions{})
+	clients, err := r.client.ListZeroKMSClients(ctx, control.ListZeroKMSClientsOptions{})
 	if err != nil {
 		return false, err
 	}

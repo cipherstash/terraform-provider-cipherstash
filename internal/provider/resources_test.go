@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -25,54 +25,60 @@ const (
 // mutation during refresh/import must fail, not silently succeed.
 type testControl struct {
 	controlClient
-	actors        func(control.ListActorsOptions) (control.ActorPage, error)
-	keys          func() ([]control.AccessKeyMetadata, error)
-	clients       func() ([]control.EncryptionClient, error)
+	actors        func(control.ListCTSActorsOptions) (control.CTSActorPage, error)
+	keys          func() ([]control.CTSAccessKeyMetadata, error)
+	clients       func() ([]control.ZeroKMSClient, error)
 	deleteActor   func(string) error
 	deleteClient  func(string) error
 	grant         func(string, string) error
 	revoke        func(string, string) error
-	createKeyset  func(control.CreateKeysetOptions) (*control.CreatedKeyset, error)
-	keysets       func(control.ListKeysetsOptions) ([]control.Keyset, error)
-	modifyKeyset  func(string, control.ModifyKeysetOptions) error
+	createKeyset  func(control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error)
+	keysets       func(control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error)
+	modifyKeyset  func(string, control.ModifyZeroKMSKeysetOptions) error
 	enableKeyset  func(string) error
 	disableKeyset func(string) error
 }
 
-func (c testControl) ListActors(_ context.Context, opts control.ListActorsOptions) (control.ActorPage, error) {
+func (c testControl) ListCTSActors(_ context.Context, opts control.ListCTSActorsOptions) (control.CTSActorPage, error) {
 	return c.actors(opts)
 }
 
-func (c testControl) ListAccessKeys(context.Context) ([]control.AccessKeyMetadata, error) {
+func (c testControl) ListCTSAccessKeys(context.Context) ([]control.CTSAccessKeyMetadata, error) {
 	return c.keys()
 }
 
-func (c testControl) ListClients(context.Context, control.ListClientsOptions) ([]control.EncryptionClient, error) {
+func (c testControl) ListZeroKMSClients(context.Context, control.ListZeroKMSClientsOptions) ([]control.ZeroKMSClient, error) {
 	return c.clients()
 }
-func (c testControl) DeleteActor(_ context.Context, id string) error  { return c.deleteActor(id) }
-func (c testControl) DeleteClient(_ context.Context, id string) error { return c.deleteClient(id) }
-func (c testControl) GrantKeyset(_ context.Context, keysetID, clientID string) error {
+func (c testControl) DeleteCTSActor(_ context.Context, id string) error { return c.deleteActor(id) }
+func (c testControl) DeleteZeroKMSClient(_ context.Context, id string) error {
+	return c.deleteClient(id)
+}
+func (c testControl) GrantZeroKMSKeyset(_ context.Context, keysetID, clientID string) error {
 	return c.grant(keysetID, clientID)
 }
 
-func (c testControl) RevokeKeyset(_ context.Context, keysetID, clientID string) error {
+func (c testControl) RevokeZeroKMSKeyset(_ context.Context, keysetID, clientID string) error {
 	return c.revoke(keysetID, clientID)
 }
 
-func (c testControl) CreateKeyset(_ context.Context, opts control.CreateKeysetOptions) (*control.CreatedKeyset, error) {
+func (c testControl) CreateZeroKMSKeyset(_ context.Context, opts control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error) {
 	return c.createKeyset(opts)
 }
 
-func (c testControl) ListKeysets(_ context.Context, opts control.ListKeysetsOptions) ([]control.Keyset, error) {
+func (c testControl) ListZeroKMSKeysets(_ context.Context, opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
 	return c.keysets(opts)
 }
 
-func (c testControl) ModifyKeyset(_ context.Context, id string, opts control.ModifyKeysetOptions) error {
+func (c testControl) ModifyZeroKMSKeyset(_ context.Context, id string, opts control.ModifyZeroKMSKeysetOptions) error {
 	return c.modifyKeyset(id, opts)
 }
-func (c testControl) EnableKeyset(_ context.Context, id string) error  { return c.enableKeyset(id) }
-func (c testControl) DisableKeyset(_ context.Context, id string) error { return c.disableKeyset(id) }
+func (c testControl) EnableZeroKMSKeyset(_ context.Context, id string) error {
+	return c.enableKeyset(id)
+}
+func (c testControl) DisableZeroKMSKeyset(_ context.Context, id string) error {
+	return c.disableKeyset(id)
+}
 
 func resourceState(t *testing.T, r resource.Resource, model any) tfsdk.State {
 	t.Helper()
@@ -106,19 +112,19 @@ func savedClient() clientModel {
 
 func TestActorRefreshPaginationAndSecrets(t *testing.T) {
 	r := &actorResource{client: testControl{
-		actors: func(opts control.ListActorsOptions) (control.ActorPage, error) {
+		actors: func(opts control.ListCTSActorsOptions) (control.CTSActorPage, error) {
 			switch opts.Cursor {
 			case "":
-				return control.ActorPage{Items: []control.Actor{{ID: "app-unrelated", Name: "unrelated"}}, NextCursor: "page2"}, nil
+				return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-unrelated", Name: "unrelated"}}, NextCursor: "page2"}, nil
 			case "page2":
-				return control.ActorPage{Items: []control.Actor{{ID: "app-actor", Name: "renamed", Kind: "agent", CreatedAt: "2026-10-26T00:00:00Z"}}}, nil
+				return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-actor", Name: "renamed", Kind: "agent", CreatedAt: "2026-10-26T00:00:00Z"}}}, nil
 			default:
 				require.FailNowf(t, "unexpected cursor", "%q", opts.Cursor)
-				return control.ActorPage{}, nil
+				return control.CTSActorPage{}, nil
 			}
 		},
-		keys: func() ([]control.AccessKeyMetadata, error) {
-			return []control.AccessKeyMetadata{{ID: "other-key", Name: "renamed", Role: "member"}, {ID: "key-1", Name: "renamed", Role: "control"}}, nil
+		keys: func() ([]control.CTSAccessKeyMetadata, error) {
+			return []control.CTSAccessKeyMetadata{{ID: "other-key", Name: "renamed", Role: "member"}, {ID: "key-1", Name: "renamed", Role: "control"}}, nil
 		},
 	}}
 	before := savedActor()
@@ -140,19 +146,19 @@ func TestActorRefreshMissingAndFailedReads(t *testing.T) {
 	for _, scenario := range []string{"absent", "listing failure", "missing key", "key failure", "cursor cycle"} {
 		t.Run(scenario, func(t *testing.T) {
 			r := &actorResource{client: testControl{
-				actors: func(control.ListActorsOptions) (control.ActorPage, error) {
+				actors: func(control.ListCTSActorsOptions) (control.CTSActorPage, error) {
 					switch scenario {
 					case "absent":
-						return control.ActorPage{}, nil
+						return control.CTSActorPage{}, nil
 					case "listing failure":
-						return control.ActorPage{}, control.ErrForbidden
+						return control.CTSActorPage{}, control.ErrForbidden
 					case "cursor cycle":
-						return control.ActorPage{NextCursor: "repeat"}, nil
+						return control.CTSActorPage{NextCursor: "repeat"}, nil
 					default:
-						return control.ActorPage{Items: []control.Actor{{ID: "app-actor", Name: "before"}}}, nil
+						return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-actor", Name: "before"}}}, nil
 					}
 				},
-				keys: func() ([]control.AccessKeyMetadata, error) {
+				keys: func() ([]control.CTSAccessKeyMetadata, error) {
 					if scenario == "key failure" {
 						return nil, errors.New("upstream body test-secret-not-a-credential")
 					}
@@ -177,11 +183,11 @@ func TestActorRefreshMissingAndFailedReads(t *testing.T) {
 
 func TestActorImportDoesNotInventSecret(t *testing.T) {
 	r := &actorResource{client: testControl{
-		actors: func(control.ListActorsOptions) (control.ActorPage, error) {
-			return control.ActorPage{Items: []control.Actor{{ID: "app-imported", Name: "imported", Kind: "app", CreatedAt: "today"}}}, nil
+		actors: func(control.ListCTSActorsOptions) (control.CTSActorPage, error) {
+			return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-imported", Name: "imported", Kind: "app", CreatedAt: "today"}}}, nil
 		},
-		keys: func() ([]control.AccessKeyMetadata, error) {
-			return []control.AccessKeyMetadata{{ID: "key-imported", Name: "imported", Role: "member"}}, nil
+		keys: func() ([]control.CTSAccessKeyMetadata, error) {
+			return []control.CTSAccessKeyMetadata{{ID: "key-imported", Name: "imported", Role: "member"}}, nil
 		},
 	}}
 	imported := resource.ImportStateResponse{State: resourceState(t, r, actorModel{})}
@@ -200,16 +206,16 @@ func TestActorImportDoesNotInventSecret(t *testing.T) {
 func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
 	for _, scenario := range []string{"external grants", "missing tracked grant", "absent", "failed list"} {
 		t.Run(scenario, func(t *testing.T) {
-			r := &clientResource{client: testControl{clients: func() ([]control.EncryptionClient, error) {
+			r := &clientResource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
 				switch scenario {
 				case "absent":
 					return nil, nil
 				case "failed list":
 					return nil, control.ErrAuthentication
 				case "missing tracked grant":
-					return []control.EncryptionClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID}}}, nil
+					return []control.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID}}}, nil
 				default:
-					return []control.EncryptionClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID, keysetID}}}, nil
+					return []control.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID, keysetID}}}, nil
 				}
 			}}}
 			before := savedClient()
@@ -253,12 +259,12 @@ func TestClientImportPreservesHistoricalMetadata(t *testing.T) {
 		{"missing object", clientID, nil, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &clientResource{client: testControl{clients: func() ([]control.EncryptionClient, error) {
+			r := &clientResource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
 				if tc.name == "missing object" {
 					return nil, nil
 				}
 
-				return []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "imported description", KeysetIDs: tc.grants}}, nil
+				return []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "imported description", KeysetIDs: tc.grants}}, nil
 			}}}
 			resp := resource.ImportStateResponse{State: resourceState(t, r, clientModel{})}
 			r.ImportState(context.Background(), resource.ImportStateRequest{ID: tc.id}, &resp)
@@ -302,19 +308,19 @@ func TestDeleteAlreadyAbsentAndFailures(t *testing.T) {
 func TestClientDataSourceRead(t *testing.T) {
 	for _, scenario := range []string{"multiple grants", "no grants", "missing", "failed list", "invalid id"} {
 		t.Run(scenario, func(t *testing.T) {
-			d := &clientDataSource{client: testControl{clients: func() ([]control.EncryptionClient, error) {
+			d := &clientDataSource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
 				if scenario == "failed list" {
 					return nil, errors.New("upstream body test-secret-not-a-credential")
 				}
 
-				clients := []control.EncryptionClient{{ID: "44444444-4444-4444-8444-444444444444", Name: "unrelated", KeysetIDs: []string{tenantKeysetID}}}
+				clients := []control.ZeroKMSClient{{ID: "44444444-4444-4444-8444-444444444444", Name: "unrelated", KeysetIDs: []string{tenantKeysetID}}}
 				if scenario != "missing" {
 					grants := []string{tenantKeysetID, keysetID}
 					if scenario == "no grants" {
 						grants = []string{}
 					}
 
-					clients = append(clients, control.EncryptionClient{ID: clientID, Name: "existing", Description: "current description", KeysetIDs: grants})
+					clients = append(clients, control.ZeroKMSClient{ID: clientID, Name: "existing", Description: "current description", KeysetIDs: grants})
 				}
 
 				return clients, nil
@@ -377,7 +383,7 @@ func TestKeysetGrantCreateStateOnFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			attempted := false
 			r := &keysetGrantResource{client: testControl{
-				clients: func() ([]control.EncryptionClient, error) {
+				clients: func() ([]control.ZeroKMSClient, error) {
 					if (!attempted && tc.preflightError) || (attempted && tc.readError) {
 						return nil, control.ErrForbidden
 					}
@@ -387,7 +393,7 @@ func TestKeysetGrantCreateStateOnFailure(t *testing.T) {
 						grants = append(grants, keysetID)
 					}
 
-					return []control.EncryptionClient{{ID: clientID, KeysetIDs: grants}}, nil
+					return []control.ZeroKMSClient{{ID: clientID, KeysetIDs: grants}}, nil
 				},
 				grant: func(keyset, client string) error {
 					require.False(t, attempted || tc.alreadyPresent || tc.preflightError, "unexpected grant mutation")
@@ -421,20 +427,20 @@ func TestKeysetGrantCreateStateOnFailure(t *testing.T) {
 func TestKeysetGrantRefreshAndImport(t *testing.T) {
 	for _, scenario := range []string{"present", "missing grant", "missing client", "failed list"} {
 		t.Run(scenario, func(t *testing.T) {
-			r := &keysetGrantResource{client: testControl{clients: func() ([]control.EncryptionClient, error) {
+			r := &keysetGrantResource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
 				if scenario == "failed list" {
 					return nil, control.ErrAuthentication
 				}
 
 				// A grant to a different client must never satisfy this pair.
-				clients := []control.EncryptionClient{{ID: "44444444-4444-4444-8444-444444444444", KeysetIDs: []string{keysetID}}}
+				clients := []control.ZeroKMSClient{{ID: "44444444-4444-4444-8444-444444444444", KeysetIDs: []string{keysetID}}}
 				if scenario != "missing client" {
 					grants := []string{tenantKeysetID}
 					if scenario == "present" {
 						grants = append(grants, keysetID)
 					}
 
-					clients = append(clients, control.EncryptionClient{ID: clientID, KeysetIDs: grants})
+					clients = append(clients, control.ZeroKMSClient{ID: clientID, KeysetIDs: grants})
 				}
 
 				return clients, nil
@@ -479,7 +485,7 @@ func TestKeysetGrantDeleteRequiresConfirmedAbsence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			attempted := false
 			r := &keysetGrantResource{client: testControl{
-				clients: func() ([]control.EncryptionClient, error) {
+				clients: func() ([]control.ZeroKMSClient, error) {
 					if (!attempted && tc.preflightError) || (attempted && tc.readError) {
 						return nil, control.ErrForbidden
 					}
@@ -489,7 +495,7 @@ func TestKeysetGrantDeleteRequiresConfirmedAbsence(t *testing.T) {
 						grants = append(grants, keysetID)
 					}
 
-					return []control.EncryptionClient{{ID: clientID, KeysetIDs: grants}}, nil
+					return []control.ZeroKMSClient{{ID: clientID, KeysetIDs: grants}}, nil
 				},
 				revoke: func(keyset, client string) error {
 					require.False(t, attempted || tc.absent || tc.preflightError, "unexpected revoke mutation")
@@ -519,9 +525,9 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 	for _, scenario := range []string{"enabled", "disabled", "create failed", "disable failed", "read failed", "not visible"} {
 		t.Run(scenario, func(t *testing.T) {
 			var result resource.CreateResponse
-			remote := control.Keyset{ID: keysetID, Name: "created", Description: "creation description"}
+			remote := control.ZeroKMSKeyset{ID: keysetID, Name: "created", Description: "creation description"}
 			r := &keysetResource{client: testControl{
-				createKeyset: func(opts control.CreateKeysetOptions) (*control.CreatedKeyset, error) {
+				createKeyset: func(opts control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error) {
 					require.Equal(t, "created", opts.Name)
 					require.Equal(t, "creation description", opts.Description)
 					require.Nil(t, opts.Client, "keyset creation must not create a client")
@@ -529,7 +535,7 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 						return nil, control.ErrConflict
 					}
 
-					return &control.CreatedKeyset{Keyset: remote}, nil
+					return &control.CreatedZeroKMSKeyset{ZeroKMSKeyset: remote}, nil
 				},
 				disableKeyset: func(id string) error {
 					var saved keysetModel
@@ -544,7 +550,7 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 
 					return nil
 				},
-				keysets: func(opts control.ListKeysetsOptions) ([]control.Keyset, error) {
+				keysets: func(opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
 					require.True(t, opts.ShowDisabled, "disabled keysets must remain visible during reconciliation")
 					if scenario == "read failed" {
 						return nil, control.ErrAuthentication
@@ -554,7 +560,7 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 						return nil, nil
 					}
 
-					return []control.Keyset{remote}, nil
+					return []control.ZeroKMSKeyset{remote}, nil
 				},
 			}}
 			plan := resourceState(t, r, keysetModel{ID: types.StringUnknown(), Name: types.StringValue("created"), Description: types.StringValue("creation description"), Enabled: types.BoolValue(scenario == "enabled"), IsDefault: types.BoolUnknown()})
@@ -579,14 +585,14 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 	for _, scenario := range []string{"disabled", "missing", "failed list"} {
 		t.Run(scenario, func(t *testing.T) {
-			r := &keysetResource{client: testControl{keysets: func(opts control.ListKeysetsOptions) ([]control.Keyset, error) {
+			r := &keysetResource{client: testControl{keysets: func(opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
 				if scenario == "failed list" {
 					return nil, control.ErrForbidden
 				}
 
-				keysets := []control.Keyset{{ID: tenantKeysetID, Name: "unrelated", Description: "unrelated"}}
+				keysets := []control.ZeroKMSKeyset{{ID: tenantKeysetID, Name: "unrelated", Description: "unrelated"}}
 				if opts.ShowDisabled && scenario != "missing" {
-					keysets = append(keysets, control.Keyset{ID: keysetID, Name: "renamed", Description: "new description", IsDisabled: true, IsDefault: true})
+					keysets = append(keysets, control.ZeroKMSKeyset{ID: keysetID, Name: "renamed", Description: "new description", IsDisabled: true, IsDefault: true})
 				}
 
 				return keysets, nil
@@ -626,9 +632,9 @@ func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 func TestKeysetUpdatePreservesPartialSuccess(t *testing.T) {
 	for _, scenario := range []string{"success", "modify failed", "disable failed", "read failed", "write not visible"} {
 		t.Run(scenario, func(t *testing.T) {
-			remote := control.Keyset{ID: keysetID, Name: "unchanged", Description: "old description"}
+			remote := control.ZeroKMSKeyset{ID: keysetID, Name: "unchanged", Description: "old description"}
 			r := &keysetResource{client: testControl{
-				modifyKeyset: func(id string, opts control.ModifyKeysetOptions) error {
+				modifyKeyset: func(id string, opts control.ModifyZeroKMSKeysetOptions) error {
 					require.Equal(t, keysetID, id)
 					require.Nil(t, opts.Name, "metadata update must only send the changed description")
 					require.NotNil(t, opts.Description)
@@ -654,12 +660,12 @@ func TestKeysetUpdatePreservesPartialSuccess(t *testing.T) {
 
 					return nil
 				},
-				keysets: func(control.ListKeysetsOptions) ([]control.Keyset, error) {
+				keysets: func(control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
 					if scenario == "read failed" {
 						return nil, control.ErrAuthentication
 					}
 
-					return []control.Keyset{remote}, nil
+					return []control.ZeroKMSKeyset{remote}, nil
 				},
 			}}
 			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("unchanged"), Description: types.StringValue("old description"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)})
@@ -687,7 +693,7 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			attempted := false
 			r := &keysetResource{client: testControl{
-				keysets: func(opts control.ListKeysetsOptions) ([]control.Keyset, error) {
+				keysets: func(opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
 					require.True(t, opts.ShowDisabled, "destroy must include disabled keysets")
 					if scenario == "preflight failed" || (attempted && scenario == "read failed") {
 						return nil, control.ErrForbidden
@@ -697,7 +703,7 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 						return nil, nil
 					}
 
-					return []control.Keyset{{ID: keysetID, Name: "retained", Description: "retained description", IsDisabled: scenario == "disabled" || (attempted && scenario != "still enabled")}}, nil
+					return []control.ZeroKMSKeyset{{ID: keysetID, Name: "retained", Description: "retained description", IsDisabled: scenario == "disabled" || (attempted && scenario != "still enabled")}}, nil
 				},
 				disableKeyset: func(id string) error {
 					require.False(t, attempted, "unexpected disable mutation")

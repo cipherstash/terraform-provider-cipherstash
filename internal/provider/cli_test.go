@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/terraform-exec/tfexec"
@@ -34,8 +34,8 @@ import (
 
 const cliProvider = `
 provider "cipherstash" {
-  crn = "crn:ap-southeast-2.aws:ZVATKW3VHMFG27DY"
-  access_key = "CSAKtestKeyId.testKeySecret"
+  workspace_crn = "crn:ap-southeast-2.aws:ZVATKW3VHMFG27DY"
+  client_access_key = "CSAKtestKeyId.testKeySecret"
 }
 `
 
@@ -97,17 +97,17 @@ func TestCLIActorClientLifecycle(t *testing.T) {
 	tc := cliTestCase(t, f)
 	configuration := func(name string) string {
 		return cliProvider + fmt.Sprintf(`
-resource "cipherstash_actor" "api" {
+resource "cipherstash_cts_actor" "api" {
   name = %q
   kind = "agent"
   role = "control"
   token_expiry = 1234
 }
-resource "cipherstash_client" "api" {
+resource "cipherstash_zerokms_client" "api" {
   name = %q
   description = "API encryption"
 }
-data "cipherstash_client" "api" { id = cipherstash_client.api.id }
+data "cipherstash_zerokms_client" "api" { id = cipherstash_zerokms_client.api.id }
 `, name, name)
 	}
 	var originalActor, originalClient, actorSecret, clientSecret string
@@ -116,9 +116,9 @@ data "cipherstash_client" "api" { id = cipherstash_client.api.id }
 			f.mu.Lock()
 			defer f.mu.Unlock()
 
-			a := s.RootModule().Resources["cipherstash_actor.api"].Primary
-			c := s.RootModule().Resources["cipherstash_client.api"].Primary
-			d := s.RootModule().Resources["data.cipherstash_client.api"].Primary
+			a := s.RootModule().Resources["cipherstash_cts_actor.api"].Primary
+			c := s.RootModule().Resources["cipherstash_zerokms_client.api"].Primary
+			d := s.RootModule().Resources["data.cipherstash_zerokms_client.api"].Primary
 			if a.ID == "" || c.ID == "" || a.Attributes["access_key"] != f.secrets[a.ID] || c.Attributes["client_key"] != f.secrets[c.ID] {
 				return fmt.Errorf("state did not preserve fixture-issued identities and secrets")
 			}
@@ -143,13 +143,13 @@ data "cipherstash_client" "api" { id = cipherstash_client.api.id }
 	}
 	tc.Steps = []resource.TestStep{
 		{Config: configuration("api"), Check: check(false), ConfigStateChecks: []statecheck.StateCheck{
-			statecheck.ExpectSensitiveValue("cipherstash_actor.api", tfjsonpath.New("access_key")),
-			statecheck.ExpectSensitiveValue("cipherstash_client.api", tfjsonpath.New("client_key")),
+			statecheck.ExpectSensitiveValue("cipherstash_cts_actor.api", tfjsonpath.New("access_key")),
+			statecheck.ExpectSensitiveValue("cipherstash_zerokms_client.api", tfjsonpath.New("client_key")),
 		}},
 		{Config: configuration("api"), Check: check(false), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 		{Config: configuration("api-v2"), Check: check(true), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
-			plancheck.ExpectResourceAction("cipherstash_actor.api", plancheck.ResourceActionDestroyBeforeCreate),
-			plancheck.ExpectResourceAction("cipherstash_client.api", plancheck.ResourceActionDestroyBeforeCreate),
+			plancheck.ExpectResourceAction("cipherstash_cts_actor.api", plancheck.ResourceActionDestroyBeforeCreate),
+			plancheck.ExpectResourceAction("cipherstash_zerokms_client.api", plancheck.ResourceActionDestroyBeforeCreate),
 		}}},
 	}
 	resource.UnitTest(t, tc)
@@ -162,7 +162,7 @@ func TestCLIKeysetLifecycle(t *testing.T) {
 			tc := cliTestCase(t, f)
 			configuration := func(description string, enabled bool) string {
 				return cliProvider + fmt.Sprintf(`
-resource "cipherstash_keyset" "app" {
+resource "cipherstash_zerokms_keyset" "app" {
   name = "application"
   description = %q
   enabled = %t
@@ -175,13 +175,13 @@ resource "cipherstash_keyset" "app" {
 					f.mu.Lock()
 					defer f.mu.Unlock()
 
-					current := s.RootModule().Resources["cipherstash_keyset.app"].Primary.ID
+					current := s.RootModule().Resources["cipherstash_zerokms_keyset.app"].Primary.ID
 					if id != "" && id != current {
 						return fmt.Errorf("keyset update replaced identity")
 					}
 
 					id = current
-					i := slices.IndexFunc(f.keysets, func(k control.Keyset) bool { return k.ID == id })
+					i := slices.IndexFunc(f.keysets, func(k control.ZeroKMSKeyset) bool { return k.ID == id })
 					if i < 0 || f.keysets[i].IsDisabled == enabled || f.keysets[i].Description != description {
 						return fmt.Errorf("keyset inventory does not match configuration")
 					}
@@ -191,7 +191,7 @@ resource "cipherstash_keyset" "app" {
 			}
 			tc.Steps = []resource.TestStep{
 				{Config: configuration("initial", initiallyEnabled), Check: check(initiallyEnabled, "initial")},
-				{Config: configuration("updated", !initiallyEnabled), Check: check(!initiallyEnabled, "updated"), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_keyset.app", plancheck.ResourceActionUpdate)}}},
+				{Config: configuration("updated", !initiallyEnabled), Check: check(!initiallyEnabled, "updated"), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_zerokms_keyset.app", plancheck.ResourceActionUpdate)}}},
 				{Config: configuration("updated", initiallyEnabled), Check: check(initiallyEnabled, "updated")},
 			}
 			resource.UnitTest(t, tc)
@@ -206,19 +206,19 @@ func TestCLIGrantOwnership(t *testing.T) {
 	f := newServiceFixture(t)
 	tc := cliTestCase(t, f)
 	base := cliProvider + `
-resource "cipherstash_client" "api" {
+resource "cipherstash_zerokms_client" "api" {
   name = "api"
   description = "application client"
 }
-resource "cipherstash_keyset" "app" {
+resource "cipherstash_zerokms_keyset" "app" {
   name = "application"
   description = "application keyset"
 }
 `
 	grant := func(expression string) string {
 		return base + fmt.Sprintf(`
-resource "cipherstash_keyset_grant" "app" {
-  client_id = cipherstash_client.api.id
+resource "cipherstash_zerokms_keyset_grant" "app" {
+  client_id = cipherstash_zerokms_client.api.id
   keyset_id = %s
 }
 `, expression)
@@ -232,7 +232,7 @@ resource "cipherstash_keyset_grant" "app" {
 				return fmt.Errorf("grant operation changed the default or unrelated grants: %+v", f.clients)
 			}
 
-			if g := s.RootModule().Resources["cipherstash_keyset_grant.app"]; g != nil {
+			if g := s.RootModule().Resources["cipherstash_zerokms_keyset_grant.app"]; g != nil {
 				if !slices.Contains(f.clients[0].KeysetIDs, g.Primary.Attributes["keyset_id"]) || g.Primary.ID != f.clients[0].ID+"/"+g.Primary.Attributes["keyset_id"] {
 					return fmt.Errorf("grant state does not identify the owned pair")
 				}
@@ -242,10 +242,10 @@ resource "cipherstash_keyset_grant" "app" {
 		}
 	}
 	tc.Steps = []resource.TestStep{
-		{Config: grant("cipherstash_keyset.app.id"), Check: check(2)},
+		{Config: grant("cipherstash_zerokms_keyset.app.id"), Check: check(2)},
 		{Config: grant(fmt.Sprintf("%q", tenantKeysetID)), Check: check(2), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
-			plancheck.ExpectResourceAction("cipherstash_keyset_grant.app", plancheck.ResourceActionDestroyBeforeCreate),
-			plancheck.ExpectResourceAction("cipherstash_client.api", plancheck.ResourceActionNoop),
+			plancheck.ExpectResourceAction("cipherstash_zerokms_keyset_grant.app", plancheck.ResourceActionDestroyBeforeCreate),
+			plancheck.ExpectResourceAction("cipherstash_zerokms_client.api", plancheck.ResourceActionNoop),
 		}}},
 		{PreConfig: func() {
 			f.edit(func() { f.clients[0].KeysetIDs = append(f.clients[0].KeysetIDs, f.keysets[2].ID) })
@@ -263,12 +263,12 @@ resource "cipherstash_keyset_grant" "app" {
 
 			return nil
 		}},
-		{Config: grant("cipherstash_client.api.keyset_id"), ExpectError: regexp.MustCompile("Grant already exists")},
+		{Config: grant("cipherstash_zerokms_client.api.keyset_id"), ExpectError: regexp.MustCompile("Grant already exists")},
 		{Config: base, Check: check(2), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 		{
-			Config: grant(fmt.Sprintf("%q", keysetID)), ResourceName: "cipherstash_keyset_grant.app", ImportState: true, ImportStatePersist: true,
+			Config: grant(fmt.Sprintf("%q", keysetID)), ResourceName: "cipherstash_zerokms_keyset_grant.app", ImportState: true, ImportStatePersist: true,
 			ImportStateIdFunc: func(s *terraform.State) (string, error) {
-				return s.RootModule().Resources["cipherstash_client.api"].Primary.ID + "/" + keysetID, nil
+				return s.RootModule().Resources["cipherstash_zerokms_client.api"].Primary.ID + "/" + keysetID, nil
 			},
 		},
 		{Config: grant(fmt.Sprintf("%q", keysetID)), Check: check(2), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
@@ -276,7 +276,7 @@ resource "cipherstash_keyset_grant" "app" {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 
-			client := s.RootModule().Resources["cipherstash_client.api"].Primary
+			client := s.RootModule().Resources["cipherstash_zerokms_client.api"].Primary
 			if len(f.clients) != 1 || client.ID != f.clients[0].ID || client.Attributes["client_key"] != f.secrets[client.ID] || client.Attributes["keyset_id"] != keysetID || !slices.Equal(f.clients[0].KeysetIDs, []string{f.keysets[2].ID}) {
 				return fmt.Errorf("revoking the imported default grant changed the client or an unrelated grant")
 			}
@@ -298,18 +298,18 @@ func TestCLIImports(t *testing.T) {
 			var rejected []resource.TestStep
 			switch kind {
 			case "actor":
-				id, address = "app-imported", "cipherstash_actor.app"
-				f.actors = []control.Actor{{ID: id, Name: "imported", Kind: "app", CreatedAt: fixtureTimestamp}}
-				f.keys = []control.AccessKeyMetadata{{ID: "key-" + id, Name: "imported", Role: "member", CreatedAt: fixtureTimestamp}}
-				config = `resource "cipherstash_actor" "app" { name = "imported" }`
+				id, address = "app-imported", "cipherstash_cts_actor.app"
+				f.actors = []control.CTSActor{{ID: id, Name: "imported", Kind: "app", CreatedAt: fixtureTimestamp}}
+				f.keys = []control.CTSAccessKeyMetadata{{ID: "key-" + id, Name: "imported", Role: "member", CreatedAt: fixtureTimestamp}}
+				config = `resource "cipherstash_cts_actor" "app" { name = "imported" }`
 				checks = []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(address, tfjsonpath.New("access_key"), knownvalue.Null()),
 					statecheck.ExpectKnownValue(address, tfjsonpath.New("token_expiry"), knownvalue.Null()),
 				}
 			case "client", "client-zero-grants", "client-many-grants", "client-legacy-pair", "client-legacy-absent-grant":
-				id, address = clientID, "cipherstash_client.app"
-				f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
-				config = "resource \"cipherstash_client\" \"app\" {\n name = \"imported\"\n description = \"existing\"\n}"
+				id, address = clientID, "cipherstash_zerokms_client.app"
+				f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+				config = "resource \"cipherstash_zerokms_client\" \"app\" {\n name = \"imported\"\n description = \"existing\"\n}"
 				var historical knownvalue.Check = knownvalue.Null()
 				switch kind {
 				case "client-zero-grants", "client-legacy-absent-grant":
@@ -334,14 +334,14 @@ func TestCLIImports(t *testing.T) {
 					statecheck.ExpectKnownValue(address, tfjsonpath.New("keyset_id"), historical),
 				}
 			case "keyset":
-				id, address = tenantKeysetID, "cipherstash_keyset.app"
+				id, address = tenantKeysetID, "cipherstash_zerokms_keyset.app"
 				f.keysets[1].IsDisabled = true
-				config = "resource \"cipherstash_keyset\" \"app\" {\n name = \"external\"\n description = \"Worker owned\"\n enabled = false\n}"
+				config = "resource \"cipherstash_zerokms_keyset\" \"app\" {\n name = \"external\"\n description = \"Worker owned\"\n enabled = false\n}"
 				checks = []statecheck.StateCheck{statecheck.ExpectKnownValue(address, tfjsonpath.New("enabled"), knownvalue.Bool(false))}
 			case "keyset_grant":
-				id, address = clientID+"/"+tenantKeysetID, "cipherstash_keyset_grant.app"
-				f.clients = []control.EncryptionClient{{ID: clientID, Name: "external", KeysetIDs: []string{keysetID, tenantKeysetID}}}
-				config = fmt.Sprintf("resource \"cipherstash_keyset_grant\" \"app\" {\n client_id = %q\n keyset_id = %q\n}", clientID, tenantKeysetID)
+				id, address = clientID+"/"+tenantKeysetID, "cipherstash_zerokms_keyset_grant.app"
+				f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "external", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+				config = fmt.Sprintf("resource \"cipherstash_zerokms_keyset_grant\" \"app\" {\n client_id = %q\n keyset_id = %q\n}", clientID, tenantKeysetID)
 				tc.CheckDestroy = func(*terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
@@ -388,7 +388,7 @@ func (check persistedActorsPlan) CheckPlan(_ context.Context, req plancheck.Chec
 
 	seen := map[string]bool{}
 	for _, change := range req.Plan.ResourceChanges {
-		if change.Address != "cipherstash_actor.app" {
+		if change.Address != "cipherstash_cts_actor.app" {
 			continue
 		}
 
@@ -441,7 +441,7 @@ func testCLIActorRecovery(t *testing.T, replacement bool) {
 			lifecycle = "lifecycle { create_before_destroy = true }"
 		}
 
-		return cliProvider + fmt.Sprintf("resource \"cipherstash_actor\" \"app\" {\n name = %q\n %s\n}", name, lifecycle)
+		return cliProvider + fmt.Sprintf("resource \"cipherstash_cts_actor\" \"app\" {\n name = %q\n %s\n}", name, lifecycle)
 	}
 	count := 1
 	if replacement {
@@ -455,7 +455,7 @@ func testCLIActorRecovery(t *testing.T, replacement bool) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 
-			state := s.RootModule().Resources["cipherstash_actor.app"].Primary
+			state := s.RootModule().Resources["cipherstash_cts_actor.app"].Primary
 			if len(f.actors) != 1 || f.actors[0].ID != state.ID || f.actors[0].Name != "recovered" || state.Attributes["access_key"] != f.secrets[state.ID] {
 				return fmt.Errorf("recovery left an orphan or lost the replacement secret")
 			}
@@ -472,26 +472,26 @@ func TestCLIExternalDrift(t *testing.T) {
 		f := newServiceFixture(t)
 		tc := cliTestCase(t, f)
 		config := cliProvider + `
-resource "cipherstash_actor" "app" { name = "app" }
-resource "cipherstash_client" "app" {
+resource "cipherstash_cts_actor" "app" { name = "app" }
+resource "cipherstash_zerokms_client" "app" {
   name = "app"
   description = "application"
 }
-resource "cipherstash_keyset" "app" {
+resource "cipherstash_zerokms_keyset" "app" {
   name = "application"
   description = "owned metadata"
 }
-resource "cipherstash_keyset_grant" "app" {
-  client_id = cipherstash_client.app.id
-  keyset_id = cipherstash_keyset.app.id
+resource "cipherstash_zerokms_keyset_grant" "app" {
+  client_id = cipherstash_zerokms_client.app.id
+  keyset_id = cipherstash_zerokms_keyset.app.id
 }
 `
 		var oldActor, oldClient, oldKeyset string
 		tc.Steps = []resource.TestStep{
 			{Config: config, Check: func(s *terraform.State) error {
-				oldActor = s.RootModule().Resources["cipherstash_actor.app"].Primary.ID
-				oldClient = s.RootModule().Resources["cipherstash_client.app"].Primary.ID
-				oldKeyset = s.RootModule().Resources["cipherstash_keyset.app"].Primary.ID
+				oldActor = s.RootModule().Resources["cipherstash_cts_actor.app"].Primary.ID
+				oldClient = s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary.ID
+				oldKeyset = s.RootModule().Resources["cipherstash_zerokms_keyset.app"].Primary.ID
 
 				return nil
 			}},
@@ -502,15 +502,15 @@ resource "cipherstash_keyset_grant" "app" {
 					f.keysets[2].IsDisabled = true
 				})
 			}, Config: config, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
-				plancheck.ExpectResourceAction("cipherstash_actor.app", plancheck.ResourceActionCreate),
-				plancheck.ExpectResourceAction("cipherstash_client.app", plancheck.ResourceActionCreate),
-				plancheck.ExpectResourceAction("cipherstash_keyset.app", plancheck.ResourceActionUpdate),
-				plancheck.ExpectResourceAction("cipherstash_keyset_grant.app", plancheck.ResourceActionCreate),
+				plancheck.ExpectResourceAction("cipherstash_cts_actor.app", plancheck.ResourceActionCreate),
+				plancheck.ExpectResourceAction("cipherstash_zerokms_client.app", plancheck.ResourceActionCreate),
+				plancheck.ExpectResourceAction("cipherstash_zerokms_keyset.app", plancheck.ResourceActionUpdate),
+				plancheck.ExpectResourceAction("cipherstash_zerokms_keyset_grant.app", plancheck.ResourceActionCreate),
 			}}, Check: func(s *terraform.State) error {
 				f.mu.Lock()
 				defer f.mu.Unlock()
 
-				if s.RootModule().Resources["cipherstash_actor.app"].Primary.ID == oldActor || s.RootModule().Resources["cipherstash_client.app"].Primary.ID == oldClient || s.RootModule().Resources["cipherstash_keyset.app"].Primary.ID != oldKeyset {
+				if s.RootModule().Resources["cipherstash_cts_actor.app"].Primary.ID == oldActor || s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary.ID == oldClient || s.RootModule().Resources["cipherstash_zerokms_keyset.app"].Primary.ID != oldKeyset {
 					return fmt.Errorf("drift recovery recreated the wrong identities")
 				}
 
@@ -526,13 +526,13 @@ resource "cipherstash_keyset_grant" "app" {
 	t.Run("external grants and historical state", func(t *testing.T) {
 		f := newServiceFixture(t)
 		tc := cliTestCase(t, f)
-		config := cliProvider + "resource \"cipherstash_client\" \"app\" {\n name = \"app\"\n description = \"application\"\n}"
+		config := cliProvider + "resource \"cipherstash_zerokms_client\" \"app\" {\n name = \"app\"\n description = \"application\"\n}"
 		var id, secret string
 		check := func(s *terraform.State) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 
-			client := s.RootModule().Resources["cipherstash_client.app"].Primary
+			client := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 			if client.ID != id || client.Attributes["client_key"] != secret || client.Attributes["keyset_id"] != keysetID || len(f.mutations) != 1 {
 				return fmt.Errorf("refresh changed client identity, creation secret, historical keyset or grants")
 			}
@@ -541,7 +541,7 @@ resource "cipherstash_keyset_grant" "app" {
 		}
 		tc.Steps = []resource.TestStep{
 			{Config: config, Check: func(s *terraform.State) error {
-				client := s.RootModule().Resources["cipherstash_client.app"].Primary
+				client := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 				id, secret = client.ID, client.Attributes["client_key"]
 
 				return nil
@@ -559,10 +559,10 @@ resource "cipherstash_keyset_grant" "app" {
 func TestCLIMalformedInventoryRecovery(t *testing.T) {
 	f := newServiceFixture(t)
 	tc := cliTestCase(t, f)
-	config := cliProvider + "resource \"cipherstash_client\" \"app\" {\n name = \"app\"\n description = \"application\"\n}"
+	config := cliProvider + "resource \"cipherstash_zerokms_client\" \"app\" {\n name = \"app\"\n description = \"application\"\n}"
 	var id, secret string
 	check := func(s *terraform.State) error {
-		client := s.RootModule().Resources["cipherstash_client.app"].Primary
+		client := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 		if client.ID != id || client.Attributes["client_key"] != secret || client.Attributes["name"] != "app" || client.Attributes["description"] != "application" {
 			return fmt.Errorf("failed refresh changed the client's identity, metadata or secret")
 		}
@@ -572,7 +572,7 @@ func TestCLIMalformedInventoryRecovery(t *testing.T) {
 		return nil
 	}
 	tc.Steps = []resource.TestStep{{Config: config, Check: func(s *terraform.State) error {
-		client := s.RootModule().Resources["cipherstash_client.app"].Primary
+		client := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 		id, secret = client.ID, client.Attributes["client_key"]
 
 		return nil
@@ -605,27 +605,112 @@ func TestCLIMalformedInventoryRecovery(t *testing.T) {
 	resource.UnitTest(t, tc)
 }
 
+func TestCLIProviderConfiguration(t *testing.T) {
+	for _, test := range []struct{ name, config, error string }{
+		{"omitted uses environment", `provider "cipherstash" {}`, ""},
+		{"null uses environment", "provider \"cipherstash\" {\n workspace_crn = null\n client_access_key = null\n}", ""},
+		{"explicit overrides environment", cliProvider, ""},
+		{"empty crn", `provider "cipherstash" { workspace_crn = "" }`, "Workspace CRN required"},
+		{"empty key", `provider "cipherstash" { client_access_key = "" }`, "Client access key required"},
+		{"malformed crn", `provider "cipherstash" { workspace_crn = "invalid" }`, "Invalid workspace CRN"},
+		{"malformed key", `provider "cipherstash" { client_access_key = "invalid" }`, "Invalid access key"},
+		{"old crn argument", `provider "cipherstash" { crn = "invalid" }`, "Unsupported argument"},
+		{"old control key argument", `provider "cipherstash" { control_access_key = "CSAKlegacy.secret" }`, "Unsupported argument"},
+		{"old access key argument", `provider "cipherstash" { access_key = "CSAKlegacy.secret" }`, "Unsupported argument"},
+		{"legacy control environment", `provider "cipherstash" {}`, "Client access key required"},
+		{"legacy cipherstash environment", `provider "cipherstash" {}`, "Client access key required"},
+		{"malformed environment crn", `provider "cipherstash" {}`, "Invalid workspace CRN"},
+		{"malformed environment key", `provider "cipherstash" {}`, "Invalid access key"},
+		{"member credential", `provider "cipherstash" {}`, "Cannot authenticate with CipherStash"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CS_WORKSPACE_CRN", testCRN)
+			t.Setenv("CS_CLIENT_ACCESS_KEY", "CSAKtestKeyId.testKeySecret")
+			t.Setenv("CS_CONTROL_ACCESS_KEY", "")
+			t.Setenv("CIPHERSTASH_ACCESS_KEY", "")
+			switch test.name {
+			case "explicit overrides environment":
+				t.Setenv("CS_WORKSPACE_CRN", "invalid-environment-crn")
+				t.Setenv("CS_CLIENT_ACCESS_KEY", "invalid-environment-key")
+			case "legacy control environment":
+				t.Setenv("CS_CLIENT_ACCESS_KEY", "")
+				t.Setenv("CS_CONTROL_ACCESS_KEY", "CSAKlegacy.secret")
+			case "legacy cipherstash environment":
+				t.Setenv("CS_CLIENT_ACCESS_KEY", "")
+				t.Setenv("CIPHERSTASH_ACCESS_KEY", "CSAKlegacy.secret")
+			case "malformed environment crn":
+				t.Setenv("CS_WORKSPACE_CRN", "invalid-environment-crn")
+			case "malformed environment key":
+				t.Setenv("CS_CLIENT_ACCESS_KEY", "invalid-environment-key")
+				t.Setenv("CS_CONTROL_ACCESS_KEY", "CSAKlegacy.secret")
+				t.Setenv("CIPHERSTASH_ACCESS_KEY", "CSAKlegacy.secret")
+			}
+
+			f := newServiceFixture(t)
+			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "existing", KeysetIDs: []string{}}}
+			var memberTransport http.RoundTripper
+			if test.name == "member credential" {
+				memberTransport = fixtureTransport(t, "member", f.ServeHTTP)
+			}
+
+			tc := cliTestCase(t, f)
+			if memberTransport != nil {
+				// cliTestCase restores the process-default transport during cleanup.
+				http.DefaultTransport = memberTransport
+			}
+
+			tc.CheckDestroy = func(*terraform.State) error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+
+				if len(f.clients) != 1 || f.clients[0].ID != clientID || len(f.mutations) != 0 {
+					return fmt.Errorf("data source changed existing inventory")
+				}
+
+				return nil
+			}
+			step := resource.TestStep{
+				Config:            test.config + fmt.Sprintf("\ndata \"cipherstash_zerokms_client\" \"app\" { id = %q }", clientID),
+				ConfigStateChecks: []statecheck.StateCheck{statecheck.ExpectKnownValue("data.cipherstash_zerokms_client.app", tfjsonpath.New("name"), knownvalue.StringExact("existing"))},
+			}
+			if test.error != "" {
+				step.ExpectError = regexp.MustCompile(test.error)
+				step.ConfigStateChecks = nil
+			}
+
+			tc.Steps = []resource.TestStep{step}
+			resource.UnitTest(t, tc)
+			f.edit(func() {
+				assert.Empty(t, f.mutations, "provider configuration changed inventory")
+				if test.name == "member credential" {
+					assert.Empty(t, f.requests, "Member credential reached management API")
+				}
+			})
+		})
+	}
+}
+
 func TestCLIValidation(t *testing.T) {
 	for _, expiry := range []int64{1, 86400} {
 		t.Run(fmt.Sprintf("valid token lifetime %d", expiry), func(t *testing.T) {
 			f := newServiceFixture(t)
 			tc := cliTestCase(t, f)
 			tc.Steps = []resource.TestStep{{
-				Config:            cliProvider + fmt.Sprintf("resource \"cipherstash_actor\" \"app\" {\n name = \"app\"\n token_expiry = %d\n}", expiry),
-				ConfigStateChecks: []statecheck.StateCheck{statecheck.ExpectKnownValue("cipherstash_actor.app", tfjsonpath.New("token_expiry"), knownvalue.Int64Exact(expiry))},
+				Config:            cliProvider + fmt.Sprintf("resource \"cipherstash_cts_actor\" \"app\" {\n name = \"app\"\n token_expiry = %d\n}", expiry),
+				ConfigStateChecks: []statecheck.StateCheck{statecheck.ExpectKnownValue("cipherstash_cts_actor.app", tfjsonpath.New("token_expiry"), knownvalue.Int64Exact(expiry))},
 			}}
 			resource.UnitTest(t, tc)
 		})
 	}
 
 	for _, test := range []struct{ name, config, error string }{
-		{"actor kind", "resource \"cipherstash_actor\" \"app\" {\n name = \"app\"\n kind = \"human\"\n}", "Invalid Attribute Value Match"},
-		{"actor role", "resource \"cipherstash_actor\" \"app\" {\n name = \"app\"\n role = \"owner\"\n}", "Invalid Attribute Value Match"},
-		{"token below minimum", "resource \"cipherstash_actor\" \"app\" {\n name = \"app\"\n token_expiry = 0\n}", "Invalid Attribute Value"},
-		{"token above maximum", "resource \"cipherstash_actor\" \"app\" {\n name = \"app\"\n token_expiry = 86401\n}", "Invalid Attribute Value"},
-		{"keyset name", "resource \"cipherstash_keyset\" \"app\" {\n name = \"bad name!\"\n description = \"invalid\"\n}", "Invalid Attribute Value"},
-		{"grant identifier", fmt.Sprintf("resource \"cipherstash_keyset_grant\" \"app\" {\n client_id = \"not-a-uuid\"\n keyset_id = %q\n}", keysetID), "Invalid Attribute Value"},
-		{"missing lookup", fmt.Sprintf("data \"cipherstash_client\" \"app\" { id = %q }", clientID), "Client not found"},
+		{"actor kind", "resource \"cipherstash_cts_actor\" \"app\" {\n name = \"app\"\n kind = \"human\"\n}", "Invalid Attribute Value Match"},
+		{"actor role", "resource \"cipherstash_cts_actor\" \"app\" {\n name = \"app\"\n role = \"owner\"\n}", "Invalid Attribute Value Match"},
+		{"token below minimum", "resource \"cipherstash_cts_actor\" \"app\" {\n name = \"app\"\n token_expiry = 0\n}", "Invalid Attribute Value"},
+		{"token above maximum", "resource \"cipherstash_cts_actor\" \"app\" {\n name = \"app\"\n token_expiry = 86401\n}", "Invalid Attribute Value"},
+		{"keyset name", "resource \"cipherstash_zerokms_keyset\" \"app\" {\n name = \"bad name!\"\n description = \"invalid\"\n}", "Invalid Attribute Value"},
+		{"grant identifier", fmt.Sprintf("resource \"cipherstash_zerokms_keyset_grant\" \"app\" {\n client_id = \"not-a-uuid\"\n keyset_id = %q\n}", keysetID), "Invalid Attribute Value"},
+		{"missing lookup", fmt.Sprintf("data \"cipherstash_zerokms_client\" \"app\" { id = %q }", clientID), "Client not found"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newServiceFixture(t)
@@ -715,17 +800,17 @@ func TestCLIClientSeedFormat(t *testing.T) {
 				input += "\n"
 			}
 			f := newServiceFixture(t)
-			f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 			tc := cliTestCase(t, f)
 			step := resource.TestStep{Config: fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %q\nclient_key_client_id = %q", input, clientID))}
 			if valid {
-				step.Check = resource.TestCheckResourceAttr("cipherstash_client.app", "client_key", input)
+				step.Check = resource.TestCheckResourceAttr("cipherstash_zerokms_client.app", "client_key", input)
 			} else {
 				step.ExpectError = regexp.MustCompile("Cannot seed client key")
 			}
 			tc.Steps = []resource.TestStep{
 				{Config: cliProvider},
-				{Config: fmt.Sprintf(cliSeedClient, ""), ResourceName: "cipherstash_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
+				{Config: fmt.Sprintf(cliSeedClient, ""), ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
 				step,
 				{PreConfig: func() { f.edit(func() { require.Empty(t, f.mutations, "format check wrote to CipherStash") }) }, Config: fmt.Sprintf(cliSeedClient, "")},
 			}
@@ -735,7 +820,7 @@ func TestCLIClientSeedFormat(t *testing.T) {
 }
 
 const cliSeedClient = cliProvider + `
-resource "cipherstash_client" "app" {
+resource "cipherstash_zerokms_client" "app" {
   name = "imported"
   description = "existing"
   %s
@@ -744,14 +829,14 @@ resource "cipherstash_client" "app" {
 
 func TestCLIClientKeySeeding(t *testing.T) {
 	f := newServiceFixture(t)
-	f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+	f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
 	tc := cliTestCase(t, f)
 	plain := fmt.Sprintf(cliSeedClient, "")
 	seed := fmt.Sprintf("client_key = %q\nclient_key_client_id = %q", cliSeedKey, clientID)
 	check := func(s *terraform.State) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		c := s.RootModule().Resources["cipherstash_client.app"].Primary
+		c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 		if c.ID != clientID || c.Attributes["client_key"] != cliSeedKey || len(f.mutations) != 0 || !slices.Equal(f.clients[0].KeysetIDs, []string{keysetID, tenantKeysetID}) {
 			return fmt.Errorf("seeding or refresh changed identity/grants, lost the key, or wrote to CipherStash")
 		}
@@ -759,9 +844,9 @@ func TestCLIClientKeySeeding(t *testing.T) {
 	}
 	tc.Steps = []resource.TestStep{
 		{Config: cliProvider},
-		{Config: plain, ResourceName: "cipherstash_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
-		{Config: fmt.Sprintf(cliSeedClient, seed+"\nlifecycle { ignore_changes = [client_key] }"), ConfigStateChecks: []statecheck.StateCheck{statecheck.ExpectKnownValue("cipherstash_client.app", tfjsonpath.New("client_key"), knownvalue.Null())}},
-		{Config: fmt.Sprintf(cliSeedClient, seed), Check: check, ConfigStateChecks: []statecheck.StateCheck{statecheck.ExpectSensitiveValue("cipherstash_client.app", tfjsonpath.New("client_key"))}, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_client.app", plancheck.ResourceActionUpdate)}}},
+		{Config: plain, ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
+		{Config: fmt.Sprintf(cliSeedClient, seed+"\nlifecycle { ignore_changes = [client_key] }"), ConfigStateChecks: []statecheck.StateCheck{statecheck.ExpectKnownValue("cipherstash_zerokms_client.app", tfjsonpath.New("client_key"), knownvalue.Null())}},
+		{Config: fmt.Sprintf(cliSeedClient, seed), Check: check, ConfigStateChecks: []statecheck.StateCheck{statecheck.ExpectSensitiveValue("cipherstash_zerokms_client.app", tfjsonpath.New("client_key"))}, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_zerokms_client.app", plancheck.ResourceActionUpdate)}}},
 		{RefreshState: true, Check: check},
 		{Config: fmt.Sprintf(cliSeedClient, seed), Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
 	}
@@ -771,7 +856,7 @@ func TestCLIClientKeySeeding(t *testing.T) {
 		if input == "terraform_data.key.output" {
 			config += fmt.Sprintf("resource \"terraform_data\" \"key\" { input = %q }", cliOtherSeedKey)
 		}
-		tc.Steps = append(tc.Steps, resource.TestStep{Config: config, Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_client.app", plancheck.ResourceActionNoop)}}})
+		tc.Steps = append(tc.Steps, resource.TestStep{Config: config, Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_zerokms_client.app", plancheck.ResourceActionNoop)}}})
 	}
 	tc.Steps = append(tc.Steps,
 		resource.TestStep{Config: plain, Check: check},
@@ -793,7 +878,7 @@ func TestCLIClientRetainedKeyIgnoreChanges(t *testing.T) {
 				remember := func(s *terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
-					c := s.RootModule().Resources["cipherstash_client.app"].Primary
+					c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 					originalID, originalKey = c.ID, c.Attributes["client_key"]
 					originalGrants = slices.Clone(f.clients[0].KeysetIDs)
 					writes = len(f.mutations)
@@ -803,10 +888,10 @@ func TestCLIClientRetainedKeyIgnoreChanges(t *testing.T) {
 					return nil
 				}
 				if seeded {
-					f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+					f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
 					tc.Steps = []resource.TestStep{
 						{Config: cliProvider},
-						{Config: plain, ResourceName: "cipherstash_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
+						{Config: plain, ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
 						{Config: fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %q\nclient_key_client_id = %q", cliSeedKey, clientID)), Check: remember},
 					}
 				} else {
@@ -815,7 +900,7 @@ func TestCLIClientRetainedKeyIgnoreChanges(t *testing.T) {
 				check := func(s *terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
-					c := s.RootModule().Resources["cipherstash_client.app"].Primary
+					c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 					if c.ID != originalID || c.Attributes["client_key"] != originalKey || len(f.clients) != 1 || !slices.Equal(f.clients[0].KeysetIDs, originalGrants) || len(f.mutations) != writes {
 						return fmt.Errorf("ignoring retained key changed identity/key/grants or wrote to CipherStash")
 					}
@@ -839,10 +924,10 @@ func TestCLIClientSeedValidation(t *testing.T) {
 	for _, kind := range []string{"missing-uuid", "wrong-uuid", "retained-key-wrong-uuid", "invalid-key", "short-key", "raw32-key", "opaque168-key", "different-key", "unknown-key", "unknown-uuid", "create", "uuid-only-create"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newServiceFixture(t)
-			f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 			tc := cliTestCase(t, f)
 			plain := fmt.Sprintf(cliSeedClient, "")
-			tc.Steps = []resource.TestStep{{Config: cliProvider}, {Config: plain, ResourceName: "cipherstash_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID}}
+			tc.Steps = []resource.TestStep{{Config: cliProvider}, {Config: plain, ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID}}
 			key, id, extra := fmt.Sprintf("%q", cliSeedKey), fmt.Sprintf("%q", clientID), ""
 			switch kind {
 			case "missing-uuid":
@@ -854,7 +939,7 @@ func TestCLIClientSeedValidation(t *testing.T) {
 				id = fmt.Sprintf("%q", tenantKeysetID)
 				// The declared UUID exists, but is not the imported client. Merely
 				// checking its existence would accept this stale UUID/key pair.
-				f.clients = append(f.clients, control.EncryptionClient{ID: tenantKeysetID, Name: "other", Description: "unmanaged", KeysetIDs: []string{keysetID}})
+				f.clients = append(f.clients, control.ZeroKMSClient{ID: tenantKeysetID, Name: "other", Description: "unmanaged", KeysetIDs: []string{keysetID}})
 				tc.CheckDestroy = func(*terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
@@ -901,14 +986,14 @@ func TestCLIClientSeedReplacement(t *testing.T) {
 			for _, keepSeed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/create-first=%t/keep-seed=%t", mode, createFirst, keepSeed), func(t *testing.T) {
 					f := newServiceFixture(t)
-					f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+					f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 					tc := cliTestCase(t, f)
 					lifecycle := fmt.Sprintf("lifecycle { create_before_destroy = %t }", createFirst)
 					plain := fmt.Sprintf(cliSeedClient, lifecycle)
 					seed := fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %q\nclient_key_client_id = %q\n%s", cliSeedKey, clientID, lifecycle))
 					tc.Steps = []resource.TestStep{
 						{Config: cliProvider},
-						{Config: plain, ResourceName: "cipherstash_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
+						{Config: plain, ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
 						{Config: seed},
 					}
 					config := seed
@@ -921,9 +1006,9 @@ func TestCLIClientSeedReplacement(t *testing.T) {
 					case "metadata":
 						step.Config = strings.Replace(config, `name = "imported"`, `name = "replacement"`, 1)
 					case "taint":
-						step.Taint = []string{"cipherstash_client.app"}
+						step.Taint = []string{"cipherstash_zerokms_client.app"}
 					case "replace":
-						step.PreConfig = func() { t.Setenv("TF_CLI_ARGS_plan", "-replace=cipherstash_client.app") }
+						step.PreConfig = func() { t.Setenv("TF_CLI_ARGS_plan", "-replace=cipherstash_zerokms_client.app") }
 						step.ExpectNonEmptyPlan = true
 					case "missing":
 						step.PreConfig = func() { f.edit(func() { f.clients = nil }) }
@@ -934,7 +1019,7 @@ func TestCLIClientSeedReplacement(t *testing.T) {
 						step.Check = func(s *terraform.State) error {
 							f.mu.Lock()
 							defer f.mu.Unlock()
-							c := s.RootModule().Resources["cipherstash_client.app"].Primary
+							c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 							if len(f.clients) != 1 || c.ID == clientID || c.Attributes["client_key"] == cliSeedKey || c.Attributes["client_key"] != f.secrets[c.ID] {
 								return fmt.Errorf("replacement reused the seeded UUID/key or failed to retain its new key")
 							}
@@ -973,7 +1058,7 @@ func TestCLIClientSeedSavedPlan(t *testing.T) {
 	for _, readFailure := range []bool{false, true} {
 		t.Run(fmt.Sprintf("read-failure=%t", readFailure), func(t *testing.T) {
 			f := newServiceFixture(t)
-			f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 			tc := cliTestCase(t, f)
 			expected := "The planned client no longer exists"
 			if readFailure {
@@ -981,7 +1066,7 @@ func TestCLIClientSeedSavedPlan(t *testing.T) {
 			}
 			tc.Steps = []resource.TestStep{
 				{Config: cliProvider},
-				{Config: fmt.Sprintf(cliSeedClient, ""), ResourceName: "cipherstash_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
+				{Config: fmt.Sprintf(cliSeedClient, ""), ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
 				{Config: fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %q\nclient_key_client_id = %q", cliSeedKey, clientID)), ExpectError: regexp.MustCompile(expected), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{seedClientDriftAfterPlan{f, readFailure}}}},
 				{PreConfig: func() {
 					f.edit(func() { require.Empty(t, f.mutations, "failed saved adoption plan wrote to CipherStash") })
@@ -1069,7 +1154,7 @@ func testCLIClientTrace(t rapid.TB, f *serviceFixture, reattach *tfexec.Reattach
 		f.clients, f.mutations, f.requests = nil, nil, nil
 		f.secrets = map[string]string{}
 		if imported {
-			f.clients = []control.EncryptionClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
 		}
 	})
 	// The model separates operator configuration from persisted identity/secret.
@@ -1085,7 +1170,7 @@ func testCLIClientTrace(t rapid.TB, f *serviceFixture, reattach *tfexec.Reattach
 			seed += fmt.Sprintf("client_key_client_id = %q\n", cfg.assertion)
 		}
 		hcl := cliProvider + fmt.Sprintf(`
-resource "cipherstash_client" "app" {
+resource "cipherstash_zerokms_client" "app" {
   name = %q
   description = "existing"
   %s
@@ -1100,7 +1185,7 @@ resource "cipherstash_client" "app" {
 	writeConfig()
 	require.NoError(t, tf.Init(ctx, reattach))
 	if imported {
-		require.NoError(t, tf.Import(ctx, "cipherstash_client.app", clientID, reattach))
+		require.NoError(t, tf.Import(ctx, "cipherstash_zerokms_client.app", clientID, reattach))
 	} else {
 		require.NoError(t, tf.Apply(ctx, reattach))
 	}
@@ -1193,7 +1278,7 @@ resource "cipherstash_client" "app" {
 				(replacement && (cfg.key != "" || cfg.assertion != ""))
 			opts := []tfexec.PlanOption{reattach, tfexec.Out("action.tfplan")}
 			if action == "replace" {
-				opts = append(opts, tfexec.Replace("cipherstash_client.app"))
+				opts = append(opts, tfexec.Replace("cipherstash_zerokms_client.app"))
 			}
 			_, err := tf.Plan(ctx, opts...)
 			if reject {

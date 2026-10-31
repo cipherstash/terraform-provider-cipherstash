@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/internal/stack/manage"
+	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -129,8 +129,8 @@ func TestSDKActorPaginationAndMetadata(t *testing.T) {
 	for _, scenario := range []string{"later page", "repeated cursor", "missing metadata", "ambiguous metadata"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newServiceFixture(t)
-			f.actors = []control.Actor{{ID: "app-other", Name: "other", Kind: "app"}, {ID: "app-actor", Name: "renamed", Kind: "app", CreatedAt: fixtureTimestamp}}
-			f.keys = []control.AccessKeyMetadata{{ID: "key-1", Name: "renamed", Role: "control", CreatedAt: fixtureTimestamp}}
+			f.actors = []control.CTSActor{{ID: "app-other", Name: "other", Kind: "app"}, {ID: "app-actor", Name: "renamed", Kind: "app", CreatedAt: fixtureTimestamp}}
+			f.keys = []control.CTSAccessKeyMetadata{{ID: "key-1", Name: "renamed", Role: "control", CreatedAt: fixtureTimestamp}}
 			model := savedActor()
 			switch scenario {
 			case "repeated cursor":
@@ -139,7 +139,7 @@ func TestSDKActorPaginationAndMetadata(t *testing.T) {
 				f.keys = nil
 			case "ambiguous metadata":
 				model.KeyID = types.StringNull()
-				f.keys = append(f.keys, control.AccessKeyMetadata{ID: "another-key", Name: "renamed", Role: "member"})
+				f.keys = append(f.keys, control.CTSAccessKeyMetadata{ID: "another-key", Name: "renamed", Role: "member"})
 			}
 
 			r := &actorResource{client: fixtureClient(t, fixtureTransport(t, "admin", f.ServeHTTP))}
@@ -215,7 +215,7 @@ func TestSDKGrantUncertainWrites(t *testing.T) {
 			for _, readFailed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("revoke=%t/applied=%t/readFailed=%t", revoke, applied, readFailed), func(t *testing.T) {
 					f := newServiceFixture(t)
-					f.clients = []control.EncryptionClient{{ID: clientID, Name: "existing", KeysetIDs: []string{keysetID}}}
+					f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "existing", KeysetIDs: []string{keysetID}}}
 					endpoint := "/grant-keyset"
 					if revoke {
 						endpoint = "/revoke-keyset"
