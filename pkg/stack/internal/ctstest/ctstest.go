@@ -20,8 +20,8 @@ import (
 	"github.com/lestrrat-go/jwx/v3/jws"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/cts"
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/useragent"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/cts"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/useragent"
 )
 
 const (

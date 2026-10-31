@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/cts"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/cts"
 	"github.com/invopop/validation"
 )
 

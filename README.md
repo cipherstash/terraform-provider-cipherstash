@@ -8,6 +8,12 @@ Use this provider to manage machine identities, ZeroKMS clients, keysets, and ke
 
 The SDK names distinguish CTS authentication identities (`CTSActor`, `CreateCTSActor`, `ListCTSActors`) from ZeroKMS encryption identities and permissions (`ZeroKMSClient`, `ZeroKMSKeyset`, `CreateZeroKMSClient`, `GrantZeroKMSKeyset`). Options and creation results use matching names. The administrative `manage.Client`, credential export methods, environment variables and wire formats are unchanged. The old SDK API names have no compatibility aliases.
 
+## Go authentication package
+
+Go applications can import `github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth`. This is the former `internal/stack/auth` implementation, with its CTS client and test helpers kept private under `pkg/stack/internal`. It has no BNDRY SDK imports; the Terraform provider continues to use BNDRY's authentication and management packages.
+
+Use `ParseCRN`, a role-specific access-key parser (`ParseControlAccessKey`, `ParseAdminAccessKey` or `ParseMemberAccessKey`), and `NewTokenSource` to construct an `oauth2.TokenSource`. Construction validates configuration locally; calling `Token` exchanges the credential and verifies the signed token. Pass an owner-lifetime context and cancel it at shutdown. Tokens are cached until one minute before expiry; cancellation prevents further exchanges but does not invalidate a cached token. `ZeroKMSURL` returns the verified service endpoint from the token. The package does not choose environment variables or read credentials automatically.
+
 ## Before you start
 
 A [workspace](https://cipherstash.com/docs/reference/workspace) is CipherStash's unit of isolation. It contains clients, keysets, access keys, and configuration. These terms describe different parts of your setup:

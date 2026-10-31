@@ -23,8 +23,8 @@ import (
 	"github.com/auth0/go-jwt-middleware/v3/core"
 	"github.com/lestrrat-go/jwx/v3/jwk"
 
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/cts"
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/useragent"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/cts"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/useragent"
 )
 
 // Failure categories. Errors wrap one of these and, where relevant, the

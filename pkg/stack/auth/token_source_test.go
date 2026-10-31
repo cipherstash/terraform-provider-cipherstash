@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/auth"
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/ctstest"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/ctstest"
 )
 
 // issue returns an authorise handler that counts exchanges and returns the current token.

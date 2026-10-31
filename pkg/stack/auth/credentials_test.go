@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/auth"
-	"github.com/cipherstash/terraform-provider-cipherstash/internal/stack/internal/ctstest"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/ctstest"
 	"github.com/invopop/validation"
 	"github.com/sethvargo/go-envconfig"
 	"github.com/stretchr/testify/assert"
