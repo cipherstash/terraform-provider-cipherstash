@@ -17,7 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
+	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 )
 
 // actorResource is the machine identity resource. It is an actor rather than

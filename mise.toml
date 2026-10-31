@@ -4,7 +4,6 @@ terraform = "1.14.6"
 
 [env]
 GOWORK = "off"
-GOPRIVATE = "github.com/bndry-co/*"
 
 [tasks.build]
 description = "Build the local provider binary"

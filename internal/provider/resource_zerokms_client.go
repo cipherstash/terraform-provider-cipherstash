@@ -16,7 +16,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
+	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 )
 
 type clientResource struct {

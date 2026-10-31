@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bndry-co/bndry/pkg/cipherstash/auth"
-	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth"
+	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"

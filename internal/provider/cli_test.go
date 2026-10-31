@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
+	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/terraform-exec/tfexec"

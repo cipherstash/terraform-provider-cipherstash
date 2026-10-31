@@ -1,18 +1,22 @@
 # Terraform provider for CipherStash
 
-Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; BNDRY's `github.com/bndry-co/bndry/pkg/cipherstash/auth` and `/manage` packages handle authentication and service requests.
+Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; this repository's `pkg/stack/auth` and `pkg/stack/manage` packages handle authentication and service requests.
 
-**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. Fetching BNDRY's private module requires GitHub access. No Rust toolchain or WebAssembly authentication guest is required. See the pending dependency below and [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
-
-**Migration pending:** BNDRY's service-qualified management API and inventory-hardening fix must be published and pinned before using this migration against managed state. The current remote dependency predates the renamed API, so an unmodified checkout cannot build yet. Development verification uses a temporary module replacement pointing to the corrected local SDK; that is not a production dependency pin.
+**This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. No BNDRY module, sibling SDK checkout, local module replacement, Rust toolchain or WebAssembly authentication guest is required. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
 
 The SDK names distinguish CTS authentication identities (`CTSActor`, `CreateCTSActor`, `ListCTSActors`) from ZeroKMS encryption identities and permissions (`ZeroKMSClient`, `ZeroKMSKeyset`, `CreateZeroKMSClient`, `GrantZeroKMSKeyset`). Options and creation results use matching names. The administrative `manage.Client`, credential export methods, environment variables and wire formats are unchanged. The old SDK API names have no compatibility aliases.
 
-## Go authentication package
+## Go authentication and management packages
 
-Go applications can import `github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth`. This is the former `internal/stack/auth` implementation, with its CTS client and test helpers kept private under `pkg/stack/internal`. It has no BNDRY SDK imports; the Terraform provider continues to use BNDRY's authentication and management packages.
+Go applications can import `github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth` and `github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage`. The Terraform provider uses these same packages. Generated CTS and ZeroKMS clients and test helpers remain private under `pkg/stack/internal`. Neither public package depends on BNDRY or Terraform. The management package preserves the reviewed service-qualified API and inventory validation from BNDRY's copy.
 
 Use `ParseCRN`, a role-specific access-key parser (`ParseControlAccessKey`, `ParseAdminAccessKey` or `ParseMemberAccessKey`), and `NewTokenSource` to construct an `oauth2.TokenSource`. Construction validates configuration locally; calling `Token` exchanges the credential and verifies the signed token. Pass an owner-lifetime context and cancel it at shutdown. Tokens are cached until one minute before expiry; cancellation prevents further exchanges but does not invalidate a cached token. `ZeroKMSURL` returns the verified service endpoint from the token. The package does not choose environment variables or read credentials automatically.
+
+Pass that CRN and token source to `manage.NewClient`. It makes no network request during construction and does not take ownership of the token source. Operations use their caller's context and the verified token's ZeroKMS endpoint, with no automatic write retries. `ListCTSActors` returns one page; follow `NextCursor` until empty. ZeroKMS inventories are unpaginated; use `ShowDisabled: true` when disabled keysets must remain visible. A malformed inventory is an error, not an empty list. Creation results export credentials once; clear the returned bytes after persisting them, or call `Wipe` if they will not be exported. Both packages use the repository's `terraform-provider-cipherstash/` User-Agent rather than BNDRY's `bndry/` identity.
+
+`manage.Config[K auth.AccessKey]` binds `WorkspaceCRN` to `CS_WORKSPACE_CRN` and `ClientAccessKey` to `CS_CLIENT_ACCESS_KEY`, both required by `go-envconfig`. These are the same environment names as the Terraform provider. Select a concrete `auth.ControlAccessKey`, `auth.AdminAccessKey` or `auth.MemberAccessKey` type for `K`; decoding checks syntax, while signed-token verification enforces that type's role policy. For example, `envconfig.Process(ctx, &cfg)` can populate a `manage.Config[auth.AdminAccessKey]`; pass `cfg.WorkspaceCRN` and `cfg.ClientAccessKey` to `auth.NewTokenSource`. The struct does not load the environment, construct a client or grant access automatically.
+
+This replaces the old `CRN`, `ControlAccessKey` and `ClientID` fields. There is no `CS_CONTROL_ACCESS_KEY` fallback; application client IDs belong in consumer configuration rather than shared management credentials. Applications migrating from BNDRY must change both auth and manage imports together and pin a revision containing both packages; no compatibility aliases to BNDRY types are provided. BNDRY's existing worker configuration is not changed here.
 
 ## Before you start
 
@@ -45,9 +49,9 @@ provider "cipherstash" {
 
 Supply the key securely through `CS_CLIENT_ACCESS_KEY` or the sensitive `client_access_key` argument. For both `workspace_crn` and `client_access_key`, an omitted or null argument uses its environment variable. Explicit known values override the environment. Empty, unknown or malformed selected values fail without falling back to another source. Member-only credentials are rejected even though the environment variable is named `CS_CLIENT_ACCESS_KEY`.
 
-This is a breaking configuration change: replace the provider's `crn` argument with `workspace_crn`, and `access_key` or `control_access_key` with `client_access_key`. Replace `CIPHERSTASH_ACCESS_KEY` or `CS_CONTROL_ACCESS_KEY` with `CS_CLIENT_ACCESS_KEY`. Old arguments are rejected and old environment names are ignored; there are no compatibility aliases. The actor resource's computed `access_key` and all client/keyset resource arguments are unchanged. The provider argument rename alone does not change resource state. These provider conventions do not change BNDRY worker or SDK environment conventions.
+This is a breaking configuration change: replace the provider's `crn` argument with `workspace_crn`, and `access_key` or `control_access_key` with `client_access_key`. Replace `CIPHERSTASH_ACCESS_KEY` or `CS_CONTROL_ACCESS_KEY` with `CS_CLIENT_ACCESS_KEY`. Old arguments are rejected and old environment names are ignored; there are no compatibility aliases. The actor resource's computed `access_key` and all client/keyset resource arguments are unchanged. The provider argument rename alone does not change resource state.
 
-`CS_CLIENT_ID` in BNDRY's `manage.Config` identifies an application encryption client, not an authentication principal. The provider neither requires nor reads it, and does not automatically grant that client access. Use `cipherstash_zerokms_keyset_grant` to manage explicit pairs. Application client keys remain separate from provider authentication.
+`CS_CLIENT_ID` identifies an application encryption client, not an authentication principal. Neither `manage.Config` nor the provider requires or reads it, and neither automatically grants that client access. Use `cipherstash_zerokms_keyset_grant` to manage explicit pairs. Application client keys remain separate from provider authentication.
 
 Native authentication verifies each exchanged token's RS256 signature against the CipherStash Token Service (CTS) signing keys, issuer, audience, expiry, workspace and Control or Admin role. It also validates the advertised ZeroKMS endpoint before use. Each provider instance owns its token cache and authentication lifetime; reconfiguration and shutdown cancel token refresh. CTS and ZeroKMS still authorize each service request. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; actor creation's Admin requirement does not mean your application needs Admin.
 
@@ -186,9 +190,7 @@ The repository's example configurations have been removed. If you used them, pre
 
 ## Develop and verify locally
 
-Install [mise](https://mise.jdx.dev/). `mise.toml` pins Go 1.27.3 (required by BNDRY's module) and Terraform 1.14.6 and sets `GOWORK=off`, so builds and tests use only this repository's module dependencies. It marks `github.com/bndry-co/*` private with `GOPRIVATE`; configure Git authentication with read access to BNDRY before fetching dependencies. The versioned replacements in `go.mod` resolve BNDRY's workspace-only placeholder versions to real commits, not local checkouts.
-
-The commands below require the pending SDK publication and dependency-pin update described above. Until then, local verification must explicitly select the corrected SDK through a temporary module file; do not commit a local replacement or treat its binary as a published provider.
+Install [mise](https://mise.jdx.dev/). `mise.toml` pins Go 1.27.3 and Terraform 1.14.6 and sets `GOWORK=off`, so builds and tests use only this repository's module dependencies. All dependencies are public, and `go.mod` has no module replacements. A standalone checkout needs no access to BNDRY or a sibling SDK checkout.
 
 ```sh
 mise trust
@@ -216,13 +218,14 @@ Documentation generation and live acceptance are not part of `check`. This repos
 
 ### Understand test coverage
 
-The offline suite has three layers:
+The offline suite has four layers:
 
 | Layer | What it establishes |
 | --- | --- |
 | Terraform CLI (`cli_test.go`) | Real Terraform 1.14.6 plans, applies, persisted imports, refresh, replacement and destroy through the protocol server. Checks dependent resources and lookups, sensitive secrets, grant ownership, external drift and validation. Failed-create and create-before-destroy cases inspect the next plan's saved identities and secrets, including deposed objects, then recover and check for orphans. |
 | Direct native-backed tests (`failures_test.go`, `crud_test.go`, `provider_test.go`) | State retention on failed inventory reads, pagination and metadata ambiguity, partial keyset writes, uncertain grant/revoke outcomes, confirmed destroy, credential precedence, independent authentication lifetimes and cancellation. Native authentication verifies signed fixture tokens against local signing-key and HTTP fixtures; upstream error bodies must not enter diagnostics. |
 | Direct resource tests (`resources_test.go`) | Focused reconciliation tests with injected control-client results, including import restrictions, missing objects and partial failures. |
+| Public SDK (`pkg/stack/auth`, `pkg/stack/manage`) | Signed-token validation and refresh, service request contracts, malformed-inventory rejection, zero-grant clients, one-time secret export, cancellation, and no write retries or redirects. These tests use local service fixtures, not live credentials. |
 
 CLI tests use `resource.UnitTest`, so they run without live-acceptance opt-in. They require the pinned Terraform on `PATH` and fail rather than download another version. Run them through mise, which supplies the actual executable rather than a tool shim. Each case uses a temporary CLI configuration and fake credentials. The in-process provider's transport only permits local fixture routing. Tests run serially because they replace the process-default transport and environment. This setup tests separate provider session ownership directly, not Terraform provider aliases or binary installation.
 

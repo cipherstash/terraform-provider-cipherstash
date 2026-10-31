@@ -4,8 +4,8 @@ go 1.27.3
 
 require (
 	github.com/auth0/go-jwt-middleware/v3 v3.4.0
-	github.com/bndry-co/bndry/pkg v0.0.0-20261030083901-d298eb8f913c
 	github.com/fxamacker/cbor/v2 v2.10.0
+	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-plugin v1.7.0
 	github.com/hashicorp/go-uuid v1.0.3
 	github.com/hashicorp/terraform-exec v0.25.1
@@ -37,7 +37,6 @@ require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-checkpoint v0.5.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
@@ -97,11 +96,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/bndry-co/bndry v0.0.0 => github.com/bndry-co/bndry v0.0.0-20261030083901-d298eb8f913c
-
-replace github.com/bndry-co/bndry/proto v0.0.0-00010101000000-000000000000 => github.com/bndry-co/bndry/proto v0.0.0-20261030083901-d298eb8f913c
-
-replace github.com/bndry-co/bndry/tools/buf-plugin-aip v0.0.0-00010101000000-000000000000 => github.com/bndry-co/bndry/tools/buf-plugin-aip v0.0.0-20261030083901-d298eb8f913c
 
 tool github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen

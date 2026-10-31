@@ -14,7 +14,7 @@ import (
 	"sync"
 	"testing"
 
-	control "github.com/bndry-co/bndry/pkg/cipherstash/manage"
+	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 )
