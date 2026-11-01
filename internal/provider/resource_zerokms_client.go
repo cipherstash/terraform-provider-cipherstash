@@ -104,59 +104,72 @@ func validClientKey(encoded string) bool {
 		if strings.ContainsAny(encoded, "\r\n") {
 			return false // Go base64 otherwise ignores these; Stack does not.
 		}
+
 		key, err = base64.StdEncoding.Strict().DecodeString(encoded)
 	}
 	defer clear(key)
+
 	if err != nil {
 		return false
 	}
+
 	decoder, err := (cbor.DecOptions{
 		DupMapKey: cbor.DupMapKeyEnforcedAPF,
 	}).DecMode()
 	if err != nil {
 		panic(err) // Constant decoder options, not user input.
 	}
+
 	// Check field-name types explicitly: decoding into string keys coerces
 	// CBOR null to "", and Serde treats integer names as known-field aliases.
 	var permutations map[any]cbor.RawMessage
 	if err := decoder.Unmarshal(key, &permutations); err != nil {
 		return false
 	}
+
 	for name := range permutations {
 		if _, ok := name.(string); !ok {
 			return false
 		}
 	}
+
 	for i, name := range []string{"p1", "p2_from", "p2_to", "p3"} {
 		var permutation map[any]cbor.RawMessage
 		if err := decoder.Unmarshal(permutations[name], &permutation); err != nil {
 			return false
 		}
+
 		for name := range permutation {
 			if _, ok := name.(string); !ok {
 				return false
 			}
 		}
+
 		var values []any
 		if err := decoder.Unmarshal(permutation["permutation"], &values); err != nil {
 			return false
 		}
+
 		size := 16
 		if i == 3 {
 			size = 33
 		}
+
 		if len(values) != size {
 			return false
 		}
+
 		seen := uint64(0)
 		for _, value := range values {
 			index, ok := value.(uint64)
 			if !ok || index >= uint64(size) || seen&(1<<index) != 0 {
 				return false
 			}
+
 			seen |= 1 << index
 		}
 	}
+
 	return true
 }
 
@@ -175,6 +188,7 @@ func (r *clientResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 		resp.Diagnostics.AddError("Cannot seed client key", "client_key and client_key_client_id must be known during planning.")
 		return
 	}
+
 	if req.State.Raw.IsNull() {
 		// Terraform replans replacements with null prior state before Delete,
 		// including taint and -replace. A Create-only guard would be too late.
@@ -187,6 +201,7 @@ func (r *clientResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	// ignore_changes can put the persisted key into the effective config even
 	// when no seed was configured. Retaining that key needs no UUID assertion.
 	retainingKey := !state.ClientKey.IsNull() && config.ClientKey.Equal(state.ClientKey)
@@ -195,16 +210,19 @@ func (r *clientResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 		resp.Diagnostics.AddAttributeError(path.Root("client_key_client_id"), "Cannot seed client key", "Supply an explicit client_key_client_id matching the managed client UUID.")
 		return
 	}
+
 	if !config.ClientKey.IsNull() && !retainingKey {
 		if !validClientKey(config.ClientKey.ValueString()) {
 			resp.Diagnostics.AddError("Cannot seed client key", "Supply a generated v1 CBOR permutation client key encoded as standard base64 or hex. Format validation does not prove which client owns it.")
 			return
 		}
+
 		if !state.ClientKey.IsNull() && !state.ClientKey.Equal(config.ClientKey) {
 			resp.Diagnostics.AddError("Cannot seed client key", "The supplied key differs from the persisted key. Seeding is not key rotation.")
 			return
 		}
 	}
+
 	// Retention alone must not block replacement. Terraform replans it with
 	// null prior state and the original config, where configured seeds reject.
 	if (!retainingKey || !config.ClientKeyClientID.IsNull()) &&
@@ -220,6 +238,7 @@ func (r *clientResource) Create(ctx context.Context, req resource.CreateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if !config.ClientKey.IsNull() || !config.ClientKeyClientID.IsNull() {
 		resp.Diagnostics.AddError("Cannot seed client key", "Seed arguments cannot create or replace a client.")
 		return
@@ -281,6 +300,7 @@ func (r *clientResource) Update(ctx context.Context, req resource.UpdateRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if !state.ID.Equal(plan.ID) || !state.Name.Equal(plan.Name) || !state.Description.Equal(plan.Description) ||
 		(!state.ClientKey.IsNull() && !state.ClientKey.Equal(plan.ClientKey)) ||
 		(!plan.ClientKeyClientID.IsNull() && !plan.ClientKeyClientID.Equal(state.ID)) ||
@@ -296,10 +316,12 @@ func (r *clientResource) Update(ctx context.Context, req resource.UpdateRequest,
 		resp.Diagnostics.AddError("Cannot read client", operationError(err))
 		return
 	}
+
 	if found == nil {
 		resp.Diagnostics.AddError("Cannot seed client key", "The planned client no longer exists. Refresh and review the plan; no key was adopted.")
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
 }
 

@@ -775,10 +775,12 @@ func TestCLIClientSeedFormat(t *testing.T) {
 			case "float-index":
 				key["p1"]["permutation"].([]any)[0] = float64(0)
 			}
+
 			if kind != "base64" && kind != "hex" {
 				encoded, err = cbor.Marshal(key)
 				require.NoError(t, err)
 			}
+
 			switch kind {
 			case "duplicate-field":
 				encoded[0]++ // Four-entry map becomes five, with the same valid p1 twice.
@@ -791,6 +793,7 @@ func TestCLIClientSeedFormat(t *testing.T) {
 				if kind == "root-null" {
 					field = 0xf6
 				}
+
 				encoded = append(encoded, field, 0xf6)
 			case "nested-integer", "nested-null":
 				var raw map[string]cbor.RawMessage
@@ -800,6 +803,7 @@ func TestCLIClientSeedFormat(t *testing.T) {
 				if kind == "nested-null" {
 					field = 0xf6
 				}
+
 				raw["p1"] = append(raw["p1"], field, 0xf6)
 				encoded, err = cbor.Marshal(raw)
 				require.NoError(t, err)
@@ -808,12 +812,15 @@ func TestCLIClientSeedFormat(t *testing.T) {
 			case "truncated":
 				encoded = encoded[:len(encoded)-1]
 			}
+
 			input := base64.StdEncoding.EncodeToString(encoded)
-			if kind == "hex" {
+			switch kind {
+			case "hex":
 				input = strings.ToUpper(hex.EncodeToString(encoded))
-			} else if kind == "whitespace" {
+			case "whitespace":
 				input += "\n"
 			}
+
 			f := newServiceFixture(t)
 			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 			tc := cliTestCase(t, f)
@@ -823,6 +830,7 @@ func TestCLIClientSeedFormat(t *testing.T) {
 			} else {
 				step.ExpectError = regexp.MustCompile("Cannot seed client key")
 			}
+
 			tc.Steps = []resource.TestStep{
 				{Config: cliProvider},
 				{Config: fmt.Sprintf(cliSeedClient, ""), ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
@@ -851,10 +859,12 @@ func TestCLIClientKeySeeding(t *testing.T) {
 	check := func(s *terraform.State) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+
 		c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 		if c.ID != clientID || c.Attributes["client_key"] != cliSeedKey || len(f.mutations) != 0 || !slices.Equal(f.clients[0].KeysetIDs, []string{keysetID, tenantKeysetID}) {
 			return fmt.Errorf("seeding or refresh changed identity/grants, lost the key, or wrote to CipherStash")
 		}
+
 		return nil
 	}
 	tc.Steps = []resource.TestStep{
@@ -871,8 +881,10 @@ func TestCLIClientKeySeeding(t *testing.T) {
 		if input == "terraform_data.key.output" {
 			config += fmt.Sprintf("resource \"terraform_data\" \"key\" { input = %q }", cliOtherSeedKey)
 		}
+
 		tc.Steps = append(tc.Steps, resource.TestStep{Config: config, Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_zerokms_client.app", plancheck.ResourceActionNoop)}}})
 	}
+
 	tc.Steps = append(tc.Steps,
 		resource.TestStep{Config: plain, Check: check},
 		resource.TestStep{Config: fmt.Sprintf(cliSeedClient, "client_key = null\nclient_key_client_id = null"), Check: check, ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
@@ -893,6 +905,7 @@ func TestCLIClientRetainedKeyIgnoreChanges(t *testing.T) {
 				remember := func(s *terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
+
 					c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 					originalID, originalKey = c.ID, c.Attributes["client_key"]
 					originalGrants = slices.Clone(f.clients[0].KeysetIDs)
@@ -900,6 +913,7 @@ func TestCLIClientRetainedKeyIgnoreChanges(t *testing.T) {
 					if originalID == "" || originalKey == "" {
 						return fmt.Errorf("setup did not persist a client UUID and key")
 					}
+
 					return nil
 				}
 				if seeded {
@@ -912,18 +926,22 @@ func TestCLIClientRetainedKeyIgnoreChanges(t *testing.T) {
 				} else {
 					tc.Steps = []resource.TestStep{{Config: plain, Check: remember}}
 				}
+
 				check := func(s *terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
+
 					c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 					if c.ID != originalID || c.Attributes["client_key"] != originalKey || len(f.clients) != 1 || !slices.Equal(f.clients[0].KeysetIDs, originalGrants) || len(f.mutations) != writes {
 						return fmt.Errorf("ignoring retained key changed identity/key/grants or wrote to CipherStash")
 					}
+
 					return nil
 				}
 				if seeded {
 					tc.Steps = append(tc.Steps, resource.TestStep{Config: fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %q\nclient_key_client_id = %q\nlifecycle { ignore_changes = %s }", cliSeedKey, clientID, ignore)), Check: check})
 				}
+
 				config := fmt.Sprintf(cliSeedClient, fmt.Sprintf("lifecycle { ignore_changes = %s }", ignore))
 				tc.Steps = append(tc.Steps,
 					resource.TestStep{Config: config, Check: check},
@@ -951,6 +969,7 @@ func TestCLIClientSeedValidation(t *testing.T) {
 				if kind == "retained-key-wrong-uuid" {
 					tc.Steps = append(tc.Steps, resource.TestStep{Config: fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %s\nclient_key_client_id = %s", key, id))})
 				}
+
 				id = fmt.Sprintf("%q", tenantKeysetID)
 				// The declared UUID exists, but is not the imported client. Merely
 				// checking its existence would accept this stale UUID/key pair.
@@ -958,9 +977,11 @@ func TestCLIClientSeedValidation(t *testing.T) {
 				tc.CheckDestroy = func(*terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
+
 					if len(f.clients) != 1 || f.clients[0].ID != tenantKeysetID {
 						return fmt.Errorf("unmanaged client changed")
 					}
+
 					return nil
 				}
 			case "invalid-key":
@@ -986,6 +1007,7 @@ func TestCLIClientSeedValidation(t *testing.T) {
 					key = "null"
 				}
 			}
+
 			tc.Steps = append(tc.Steps,
 				resource.TestStep{Config: fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %s\nclient_key_client_id = %s", key, id)) + extra, ExpectError: regexp.MustCompile("Cannot seed client key")},
 				resource.TestStep{PreConfig: func() { f.edit(func() { require.Empty(t, f.mutations, "rejected seed mutated CipherStash") }) }, Config: cliProvider},
@@ -1016,6 +1038,7 @@ func TestCLIClientSeedReplacement(t *testing.T) {
 						config = plain
 						tc.Steps = append(tc.Steps, resource.TestStep{Config: plain})
 					}
+
 					step := resource.TestStep{Config: config}
 					switch mode {
 					case "metadata":
@@ -1028,19 +1051,23 @@ func TestCLIClientSeedReplacement(t *testing.T) {
 					case "missing":
 						step.PreConfig = func() { f.edit(func() { f.clients = nil }) }
 					}
+
 					if keepSeed {
 						step.ExpectError = regexp.MustCompile("Cannot seed client key")
 					} else {
 						step.Check = func(s *terraform.State) error {
 							f.mu.Lock()
 							defer f.mu.Unlock()
+
 							c := s.RootModule().Resources["cipherstash_zerokms_client.app"].Primary
 							if len(f.clients) != 1 || c.ID == clientID || c.Attributes["client_key"] == cliSeedKey || c.Attributes["client_key"] != f.secrets[c.ID] {
 								return fmt.Errorf("replacement reused the seeded UUID/key or failed to retain its new key")
 							}
+
 							return nil
 						}
 					}
+
 					tc.Steps = append(tc.Steps, step, resource.TestStep{PreConfig: func() {
 						t.Setenv("TF_CLI_ARGS_plan", "")
 						if keepSeed {
@@ -1079,6 +1106,7 @@ func TestCLIClientSeedSavedPlan(t *testing.T) {
 			if readFailure {
 				expected = "Cannot read client"
 			}
+
 			tc.Steps = []resource.TestStep{
 				{Config: cliProvider},
 				{Config: fmt.Sprintf(cliSeedClient, ""), ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
@@ -1099,8 +1127,10 @@ func TestCLIClientLifecycleModel(t *testing.T) {
 	cliTestCase(t, f) // Reuse pinned CLI, isolated CLI config and native auth transport.
 	p := New()
 	defer p.Close()
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+
 	configs := make(chan *plugin.ReattachConfig, 1)
 	closed := make(chan struct{})
 	served := make(chan error, 1)
@@ -1117,11 +1147,13 @@ func TestCLIClientLifecycleModel(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("provider server did not start")
 	}
+
 	defer func() {
 		cancel()
 		<-closed
 		require.NoError(t, <-served)
 	}()
+
 	reattach := tfexec.Reattach(tfexec.ReattachInfo{
 		"registry.terraform.io/hashicorp/cipherstash": {
 			Protocol: string(config.Protocol), ProtocolVersion: config.ProtocolVersion,
@@ -1137,10 +1169,12 @@ func TestCLIClientLifecycleModel(t *testing.T) {
 				if seeded {
 					actions = []string{"seed", "ignore-key", "metadata", "remove-seed", "metadata"}
 				}
+
 				testCLIClientTrace(t, f, reattach, seeded, createFirst, actions)
 			})
 		}
 	}
+
 	t.Run("generated", func(t *testing.T) {
 		rapid.Check(t, func(r *rapid.T) {
 			imported := rapid.Bool().Draw(r, "imported")
@@ -1158,9 +1192,11 @@ func testCLIClientTrace(t rapid.TB, f *serviceFixture, reattach *tfexec.Reattach
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
+
 	dir, err := os.MkdirTemp("", "cipherstash-lifecycle-")
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer func() { assert.NoError(t, os.RemoveAll(dir)) }()
+
 	binary, err := exec.LookPath("terraform")
 	require.NoError(t, err)
 	tf, err := tfexec.NewTerraform(dir, binary)
@@ -1181,9 +1217,11 @@ func testCLIClientTrace(t rapid.TB, f *serviceFixture, reattach *tfexec.Reattach
 		if cfg.key != "" {
 			seed = fmt.Sprintf("client_key = %q\n", cfg.key)
 		}
+
 		if cfg.assertion != "" {
 			seed += fmt.Sprintf("client_key_client_id = %q\n", cfg.assertion)
 		}
+
 		hcl := cliProvider + fmt.Sprintf(`
 resource "cipherstash_zerokms_client" "app" {
   name = %q
@@ -1204,6 +1242,7 @@ resource "cipherstash_zerokms_client" "app" {
 	} else {
 		require.NoError(t, tf.Apply(ctx, reattach))
 	}
+
 	// Clean even a failing/shrinking trace through Terraform, never by editing state.
 	defer func() {
 		cfg.key, cfg.assertion = "", ""
@@ -1211,11 +1250,13 @@ resource "cipherstash_zerokms_client" "app" {
 		require.NoError(t, tf.Destroy(ctx, reattach))
 		f.edit(func() { require.Empty(t, f.clients, "destroy left a test client") })
 	}()
+
 	readState := func() map[string]interface{} {
 		s, err := tf.Show(ctx, reattach)
 		require.NoError(t, err)
 		require.NotNil(t, s.Values)
 		require.Len(t, s.Values.RootModule.Resources, 1)
+
 		return s.Values.RootModule.Resources[0].AttributeValues
 	}
 	state := readState()
@@ -1228,6 +1269,7 @@ resource "cipherstash_zerokms_client" "app" {
 	} else {
 		require.Equal(t, clientID, id)
 	}
+
 	name := cfg.name
 	check := func() {
 		s := readState()
@@ -1236,6 +1278,7 @@ resource "cipherstash_zerokms_client" "app" {
 		if s["id"] != id || actualKey != key || actualBinding != binding || s["name"] != name {
 			t.Fatal("Terraform identity, key, UUID assertion or metadata differs from lifecycle model")
 		}
+
 		f.edit(func() {
 			if len(f.clients) != 1 || f.clients[0].ID != id || f.clients[0].Name != name || !slices.Equal(f.clients[0].KeysetIDs, grants) {
 				t.Fatal("service inventory differs from lifecycle model")
@@ -1258,12 +1301,15 @@ resource "cipherstash_zerokms_client" "app" {
 			if cfg.key == "" {
 				cfg.key = cliSeedKey
 			}
+
 			if action == "key-only" {
 				cfg.assertion = ""
 			}
+
 			if action == "wrong-uuid" {
 				cfg.assertion = tenantKeysetID
 			}
+
 			if action == "different-key" {
 				cfg.key = cliOtherSeedKey
 			}
@@ -1272,6 +1318,7 @@ resource "cipherstash_zerokms_client" "app" {
 		case "metadata":
 			cfg.name += "-edited"
 		}
+
 		writeConfig()
 		var writes int
 		f.edit(func() { writes = len(f.mutations) })
@@ -1282,9 +1329,11 @@ resource "cipherstash_zerokms_client" "app" {
 			if cfg.ignore == "all" {
 				nextName, nextBinding = name, binding
 			}
+
 			if cfg.ignore != "[]" || nextKey == "" {
 				nextKey = key
 			}
+
 			replacement := action == "replace" || nextName != name
 			// Existing keys are immutable. Only missing keys can be adopted,
 			// with a matching assertion; replacement needs seed-free config.
@@ -1295,11 +1344,13 @@ resource "cipherstash_zerokms_client" "app" {
 			if action == "replace" {
 				opts = append(opts, tfexec.Replace("cipherstash_zerokms_client.app"))
 			}
+
 			_, err := tf.Plan(ctx, opts...)
 			if reject {
 				if err == nil || !strings.Contains(err.Error(), "Cannot seed client key") {
 					t.Fatal("unsafe operation did not fail during planning with a seeding diagnostic")
 				}
+
 				cfg = previous
 			} else {
 				require.NoError(t, err, "permitted lifecycle action must plan successfully")
@@ -1314,18 +1365,21 @@ resource "cipherstash_zerokms_client" "app" {
 						if createFirst {
 							slices.Reverse(want)
 						}
+
 						require.Equal(t, want, f.mutations[writes:])
 						writes = len(f.mutations)
 					})
 					if id == oldID || key == "" || key == oldKey {
 						t.Fatal("replacement reused the old identity/key")
 					}
+
 					name, binding, grants = cfg.name, "", []string{keysetID}
 				} else {
 					name, key, binding = nextName, nextKey, nextBinding
 				}
 			}
 		}
+
 		f.edit(func() { require.Len(t, f.mutations, writes, "retention, adoption or rejection wrote to CipherStash") })
 		check()
 	}

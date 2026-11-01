@@ -64,14 +64,17 @@ func testConfigEnvconfig[K auth.AccessKey](t *testing.T, want K) {
 					delete(values, tc.field)
 				}
 			}
+
 			var cfg manage.Config[K]
 			err := envconfig.ProcessWith(t.Context(), &envconfig.Config{Target: &cfg, Lookuper: envconfig.MapLookuper(values)})
 			if tc.field != "" {
 				require.Error(t, err)
 				assert.NotContains(t, err.Error(), "invalid-secret")
 				assert.NotContains(t, err.Error(), "CSAKlegacy.secret")
+
 				return
 			}
+
 			require.NoError(t, err)
 			assert.Equal(t, workspaceCRN(t), cfg.WorkspaceCRN)
 			assert.Equal(t, want, cfg.ClientAccessKey)
@@ -125,12 +128,14 @@ func newClient(t *testing.T, handler http.HandlerFunc) *manage.Client {
 		if r.Header.Get("Authorization") != "Bearer "+bearer || r.Header.Get("User-Agent") != useragent.Value {
 			t.Errorf("%s %s: wrong credentials or User-Agent", r.Method, r.URL.Path)
 		}
+
 		switch r.Host {
 		case zeroKMSHost:
 			path, ok := strings.CutPrefix(r.URL.Path, "/zerokms/")
 			if !ok {
 				t.Errorf("%s %s: ZeroKMS request outside the endpoint path", r.Method, r.URL.Path)
 			}
+
 			r.URL.Path = "/" + path
 		case ctstest.Host:
 			if r.Header.Get("X-Cs-Workspace-Id") != ctstest.Workspace {
@@ -139,6 +144,7 @@ func newClient(t *testing.T, handler http.HandlerFunc) *manage.Client {
 		default:
 			t.Errorf("%s %s: request for unexpected host %s", r.Method, r.URL.Path, r.Host)
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		handler(w, r)
 	}))
@@ -180,6 +186,7 @@ func TestNewClient(t *testing.T) {
 			assert.Nil(t, client)
 		})
 	}
+
 	_, err := manage.NewClient(workspaceCRN(t), counting)
 	require.NoError(t, err)
 	assert.Zero(t, tokenCalls.Load(), "construction must not acquire a token")
@@ -275,10 +282,12 @@ func TestActorAndClientContractsAndOneShotSecrets(t *testing.T) {
 
 				return
 			}
+
 			wins.Add(1)
 			assert.Equal(t, "encoded-client-key", string(exported))
 		})
 	}
+
 	wg.Wait()
 	assert.Equal(t, int32(1), wins.Load(), "secret export must be exclusive")
 
@@ -367,10 +376,12 @@ func TestKeysetContracts(t *testing.T) {
 		if !assert.True(t, ok, "unexpected path %s", r.URL.Path) || !assert.Equal(t, http.MethodPost, r.Method) {
 			return
 		}
+
 		var got any
 		if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&got)) {
 			return
 		}
+
 		assert.JSONEq(t, want, mustJSON(t, got), r.URL.Path)
 		switch r.URL.Path {
 		case "/create-keyset":
@@ -493,16 +504,19 @@ func TestInvalidInventoriesAreNotEmptyInventories(t *testing.T) {
 		_, err = client.ListCTSAccessKeys(ctx)
 		require.ErrorIs(t, err, manage.ErrResponse, "access keys %.20q", response)
 	}
+
 	for _, response := range []string{`null`, `{}`, `{"items":null}`, `{"items":[{}]}`} {
 		body.Store(response)
 		_, err := client.ListCTSActors(ctx, manage.ListCTSActorsOptions{})
 		require.ErrorIs(t, err, manage.ErrResponse, response)
 	}
+
 	for _, state := range []string{``, `,"is_disabled":null`} {
 		body.Store(`[{"id":"00000000-0000-4000-8000-000000000011","name":"tenant","description":""` + state + `}]`)
 		_, err := client.ListZeroKMSKeysets(ctx, manage.ListZeroKMSKeysetsOptions{})
 		require.ErrorIs(t, err, manage.ErrResponse, state)
 	}
+
 	body.Store(`[{"id":"00000000-0000-4000-8000-000000000001","description":"","keyset_id":[]}]`)
 	_, err := client.ListZeroKMSClients(ctx, manage.ListZeroKMSClientsOptions{})
 	require.ErrorIs(t, err, manage.ErrResponse, "client without a name")
@@ -517,6 +531,7 @@ func TestInvalidInventoriesAreNotEmptyInventories(t *testing.T) {
 			if kind == "keyset" && strings.Contains(malformed, "grant") {
 				continue
 			}
+
 			t.Run(kind+"/"+malformed, func(t *testing.T) {
 				wire := `[{"id":"00000000-0000-4000-8000-000000000001","name":"app","description":"","keyset_id":["00000000-0000-4000-8000-000000000011"],"is_disabled":false}]`
 				switch malformed {
@@ -537,6 +552,7 @@ func TestInvalidInventoriesAreNotEmptyInventories(t *testing.T) {
 					field := map[string]string{"duplicate grants": "keyset_id", "escaped duplicate grants": `keyset_\u0069d`, "case duplicate grants": "KEYSET_ID"}[malformed]
 					wire = strings.Replace(wire, `"keyset_id":`, `"`+field+`":[],"keyset_id":`, 1)
 				}
+
 				body.Store(wire)
 				if kind == "client" {
 					items, err := client.ListZeroKMSClients(ctx, manage.ListZeroKMSClientsOptions{})
@@ -580,6 +596,7 @@ func TestIncompleteCreationResponsesFailWithoutRetry(t *testing.T) {
 		if r.URL.Path == "/api/actors" {
 			w.WriteHeader(http.StatusCreated)
 		}
+
 		_, _ = fmt.Fprint(w, body.Load().(string))
 	})
 	ctx := t.Context()
@@ -589,26 +606,35 @@ func TestIncompleteCreationResponsesFailWithoutRetry(t *testing.T) {
 		required []string
 		call     func() error
 	}{
-		{"actor", `{"actorId":"actor-1","name":"worker","kind":"app","role":"member","accessKey":"CSAKone.secret"}`,
-			[]string{"actorId", "name", "kind", "role", "accessKey"}, func() error {
+		{
+			"actor", `{"actorId":"actor-1","name":"worker","kind":"app","role":"member","accessKey":"CSAKone.secret"}`,
+			[]string{"actorId", "name", "kind", "role", "accessKey"},
+			func() error {
 				out, err := client.CreateCTSActor(ctx, manage.CreateCTSActorOptions{Name: "worker", Kind: "app"})
 				out.Wipe()
 
 				return err
-			}},
-		{"client", `{"id":"client-1","name":"app","description":"","dataset_id":"keyset-1","client_key":"encoded-key"}`,
-			[]string{"id", "name", "description", "dataset_id", "client_key"}, func() error {
+			},
+		},
+		{
+			"client", `{"id":"client-1","name":"app","description":"","dataset_id":"keyset-1","client_key":"encoded-key"}`,
+			[]string{"id", "name", "description", "dataset_id", "client_key"},
+			func() error {
 				out, err := client.CreateZeroKMSClient(ctx, manage.CreateZeroKMSClientOptions{Name: "app"})
 				out.Wipe()
 
 				return err
-			}},
-		{"keyset", `{"id":"keyset-1","name":"tenant","description":"","is_disabled":false}`,
-			[]string{"id", "name", "description", "is_disabled"}, func() error {
+			},
+		},
+		{
+			"keyset", `{"id":"keyset-1","name":"tenant","description":"","is_disabled":false}`,
+			[]string{"id", "name", "description", "is_disabled"},
+			func() error {
 				_, err := client.CreateZeroKMSKeyset(ctx, manage.CreateZeroKMSKeysetOptions{Name: "tenant"})
 
 				return err
-			}},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body.Store(tc.valid)
@@ -622,6 +648,7 @@ func TestIncompleteCreationResponsesFailWithoutRetry(t *testing.T) {
 					} else {
 						response[field] = nil
 					}
+
 					body.Store(mustJSON(t, response))
 					before := calls.Load()
 					require.ErrorIs(t, tc.call(), manage.ErrResponse, "%s missing=%v", field, missing)
@@ -655,6 +682,7 @@ func TestRefreshedBearerAndEndpointStayPaired(t *testing.T) {
 		}))
 		t.Cleanup(endpoints[i].Close)
 	}
+
 	var exchanges atomic.Int32
 	cts := ctstest.New(t, func(w http.ResponseWriter, _ *http.Request) {
 		i := min(int(exchanges.Add(1))-1, 1)
@@ -666,6 +694,7 @@ func TestRefreshedBearerAndEndpointStayPaired(t *testing.T) {
 		claims["services"] = map[string]string{"zerokms": endpoints[i].URL}
 		issued[i] = cts.Sign(t, claims)
 	}
+
 	key, err := auth.ParseControlAccessKey(ctstest.AccessKey)
 	require.NoError(t, err)
 	tokens, err := auth.NewTokenSource(t.Context(), workspaceCRN(t), key, auth.WithTransport(cts.Transport()))
@@ -682,6 +711,7 @@ func TestRefreshedBearerAndEndpointStayPaired(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []manage.ZeroKMSKeyset{{ID: "00000000-0000-4000-8000-000000000001", Name: "tenant"}}, keysets)
 	}
+
 	assert.Equal(t, int32(2), exchanges.Load())
 	assert.Equal(t, int32(0), requests[0].Load())
 	assert.Equal(t, int32(2), requests[1].Load())

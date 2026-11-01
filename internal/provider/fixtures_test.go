@@ -32,16 +32,20 @@ func fixtureClientKey(seed string) string {
 		if name == "p3" {
 			size = 33
 		}
+
 		key[name] = map[string][]int{"permutation": rng.Perm(size)}
 	}
+
 	mode, err := cbor.CanonicalEncOptions().EncMode()
 	if err != nil {
 		panic(err)
 	}
+
 	encoded, err := mode.Marshal(key)
 	if err != nil {
 		panic(err)
 	}
+
 	return base64.StdEncoding.EncodeToString(encoded)
 }
 

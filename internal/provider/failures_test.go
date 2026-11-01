@@ -188,6 +188,7 @@ func TestSDKKeysetPartialWrites(t *testing.T) {
 			if test.name == "metadata and confirmation rejected after enable" {
 				f.faults = append(f.faults, serviceFault{path: "/list-keysets", status: 500})
 			}
+
 			r := &keysetResource{client: fixtureClient(t, fixtureTransport(t, "admin", f.ServeHTTP))}
 			model := keysetModel{ID: types.StringValue(tenantKeysetID), Name: types.StringValue("external"), Description: types.StringValue("Worker owned"), Enabled: types.BoolValue(test.initiallyEnabled), IsDefault: types.BoolValue(false)}
 			before := resourceState(t, r, model)

@@ -33,12 +33,15 @@ func (c *Client) CreateZeroKMSKeyset(ctx context.Context, opts CreateZeroKMSKeys
 	if err := checkResponse(serviceZeroKMS, resp, err); err != nil {
 		return nil, err
 	}
+
 	// The body contains the created client's key.
 	defer clear(resp.Body)
+
 	out := resp.JSON200
 	if out == nil || out.ID == "" || out.Name == "" || out.Description == nil || out.IsDisabled == nil {
 		return nil, fmt.Errorf("%w: incomplete create-keyset response", ErrResponse)
 	}
+
 	if (opts.Client != nil && out.Client == nil) || (out.Client != nil && (out.Client.ID == "" || out.Client.ClientKey == "")) {
 		return nil, fmt.Errorf("%w: incomplete created keyset client", ErrResponse)
 	}
@@ -56,6 +59,7 @@ func (c *Client) CreateZeroKMSKeyset(ctx context.Context, opts CreateZeroKMSKeys
 		if opts.Client != nil {
 			name = opts.Client.Name
 		}
+
 		created.Client = &CreatedZeroKMSClient{
 			ID:        out.Client.ID,
 			Name:      name,
@@ -74,6 +78,7 @@ func (c *Client) ListZeroKMSKeysets(ctx context.Context, opts ListZeroKMSKeysets
 	if err := checkResponse(serviceZeroKMS, resp, err); err != nil {
 		return nil, err
 	}
+
 	// A missing or null inventory is malformed; an empty array is not.
 	if resp.JSON200 == nil || *resp.JSON200 == nil {
 		return nil, fmt.Errorf("%w: missing keyset list", ErrResponse)
@@ -84,9 +89,11 @@ func (c *Client) ListZeroKMSKeysets(ctx context.Context, opts ListZeroKMSKeysets
 		if len(keyset.ID) != 36 || uuid.Validate(keyset.ID) != nil {
 			return nil, fmt.Errorf("%w: invalid keyset UUID", ErrResponse)
 		}
+
 		if keyset.Name == "" || keyset.Description == nil || keyset.IsDisabled == nil {
 			return nil, fmt.Errorf("%w: incomplete keyset", ErrResponse)
 		}
+
 		keysets = append(keysets, ZeroKMSKeyset{
 			ID:          keyset.ID,
 			Name:        keyset.Name,
@@ -95,6 +102,7 @@ func (c *Client) ListZeroKMSKeysets(ctx context.Context, opts ListZeroKMSKeysets
 			IsDefault:   keyset.IsDefault != nil && *keyset.IsDefault,
 		})
 	}
+
 	if err := checkInventoryDuplicates(resp.Body); err != nil {
 		return nil, err
 	}

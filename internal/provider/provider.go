@@ -101,6 +101,7 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		} else {
 			resp.Diagnostics.AddAttributeError(path.Root("client_access_key"), "Invalid access key", "Use an Admin access key with the CSAK prefix and an ID and secret separated by a dot.")
 		}
+
 		return
 	}
 

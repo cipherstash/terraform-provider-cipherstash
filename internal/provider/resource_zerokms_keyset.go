@@ -86,6 +86,7 @@ func (r *keysetResource) ModifyPlan(ctx context.Context, req resource.ModifyPlan
 		resp.Diagnostics.AddWarning("Destroy disables the keyset", "Applying this destroy will disable the keyset, interrupting clients that use it, then remove it from Terraform state. The keyset and key material remain remotely. Import its UUID to manage it again.")
 		return
 	}
+
 	if req.State.Raw.IsNull() {
 		return
 	}
@@ -195,6 +196,7 @@ func (r *keysetResource) applyChanges(ctx context.Context, plan, current keysetM
 			if errors.Is(err, control.ErrForbidden) {
 				detail = "CipherStash denied the metadata update. Check whether the keyset is disabled, as well as the Admin credential's permissions. Metadata changes require an enabled keyset."
 			}
+
 			diagnostics.AddError("Cannot modify keyset", detail)
 		} else {
 			current.Name, current.Description = plan.Name, plan.Description

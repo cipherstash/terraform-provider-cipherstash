@@ -54,6 +54,7 @@ func (c testControl) DeleteCTSActor(_ context.Context, id string) error { return
 func (c testControl) DeleteZeroKMSClient(_ context.Context, id string) error {
 	return c.deleteClient(id)
 }
+
 func (c testControl) GrantZeroKMSKeyset(_ context.Context, keysetID, clientID string) error {
 	return c.grant(keysetID, clientID)
 }
@@ -73,9 +74,11 @@ func (c testControl) ListZeroKMSKeysets(_ context.Context, opts control.ListZero
 func (c testControl) ModifyZeroKMSKeyset(_ context.Context, id string, opts control.ModifyZeroKMSKeysetOptions) error {
 	return c.modifyKeyset(id, opts)
 }
+
 func (c testControl) EnableZeroKMSKeyset(_ context.Context, id string) error {
 	return c.enableKeyset(id)
 }
+
 func (c testControl) DisableZeroKMSKeyset(_ context.Context, id string) error {
 	return c.disableKeyset(id)
 }

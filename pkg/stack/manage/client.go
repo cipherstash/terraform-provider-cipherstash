@@ -104,16 +104,20 @@ func NewClient(crn auth.CRN, tokens oauth2.TokenSource, opts ...ClientOption) (*
 	if err := crn.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: workspace CRN: %w", ErrConfig, err)
 	}
+
 	if tokens == nil {
 		return nil, fmt.Errorf("%w: token source is required", ErrConfig)
 	}
+
 	options := clientOptions{transport: http.DefaultTransport}
 	for _, opt := range opts {
 		opt(&options)
 	}
+
 	if options.transport == nil {
 		return nil, fmt.Errorf("%w: transport is required", ErrConfig)
 	}
+
 	httpClient := &http.Client{
 		Transport:     options.transport,
 		Timeout:       requestTimeout,
@@ -125,6 +129,7 @@ func NewClient(crn auth.CRN, tokens oauth2.TokenSource, opts ...ClientOption) (*
 			if _, err := authorize(ctx, tokens, req); err != nil {
 				return err
 			}
+
 			// CTS administration names the workspace in a header, including on
 			// operations whose published schema omits it.
 			req.Header.Set("X-Cs-Workspace-Id", crn.WorkspaceID())
@@ -135,6 +140,7 @@ func NewClient(crn auth.CRN, tokens oauth2.TokenSource, opts ...ClientOption) (*
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
+
 	zeroKMSClient, err := zerokms.NewClientWithResponses(zeroKMSPlaceholder,
 		zerokms.WithHTTPClient(httpClient),
 		zerokms.WithRequestEditorFn(func(ctx context.Context, req *http.Request) error {
@@ -142,6 +148,7 @@ func NewClient(crn auth.CRN, tokens oauth2.TokenSource, opts ...ClientOption) (*
 			if err != nil {
 				return err
 			}
+
 			endpoint, err := auth.ZeroKMSURL(token)
 			if err != nil {
 				return err
@@ -166,10 +173,12 @@ func authorize(ctx context.Context, tokens oauth2.TokenSource, req *http.Request
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTransport, err)
 	}
+
 	token, err := tokens.Token()
 	if err != nil {
 		return nil, err
 	}
+
 	token.SetAuthHeader(req)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", useragent.Value)
@@ -198,35 +207,42 @@ func checkInventoryDuplicates(body []byte) error {
 	if err := json.Unmarshal(body, &items); err != nil {
 		return invalid
 	}
+
 	for _, item := range items {
 		decoder := json.NewDecoder(bytes.NewReader(item))
 		if _, err := decoder.Token(); err != nil {
 			return invalid
 		}
+
 		seen := map[string]bool{}
 		for decoder.More() {
 			field, err := decoder.Token()
 			if err != nil {
 				return invalid
 			}
+
 			name, ok := field.(string)
 			if !ok {
 				return invalid
 			}
+
 			for _, identity := range []string{"id", "keyset_id"} {
 				if strings.EqualFold(name, identity) {
 					if seen[identity] {
 						return invalid
 					}
+
 					seen[identity] = true
 				}
 			}
+
 			var value json.RawMessage
 			if err := decoder.Decode(&value); err != nil {
 				return invalid
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -240,6 +256,7 @@ func checkResponse(service string, resp interface{ StatusCode() int }, err error
 				return err
 			}
 		}
+
 		_, isSyntaxError := errors.AsType[*json.SyntaxError](err)
 		_, isTypeError := errors.AsType[*json.UnmarshalTypeError](err)
 		if isSyntaxError || isTypeError {
@@ -249,6 +266,7 @@ func checkResponse(service string, resp interface{ StatusCode() int }, err error
 
 		return fmt.Errorf("%w: %s: %w", ErrTransport, service, err)
 	}
+
 	if status := resp.StatusCode(); status < http.StatusOK || status >= http.StatusMultipleChoices {
 		return &HTTPError{Service: service, StatusCode: status}
 	}

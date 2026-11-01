@@ -59,8 +59,10 @@ func (c *Client) CreateZeroKMSClient(ctx context.Context, opts CreateZeroKMSClie
 	if err := checkResponse(serviceZeroKMS, resp, err); err != nil {
 		return nil, err
 	}
+
 	// The body contains the client key.
 	defer clear(resp.Body)
+
 	out := resp.JSON200
 	if out == nil || out.ID == "" || out.Name == "" || out.Description == nil || out.DatasetID == "" || out.ClientKey == "" {
 		return nil, fmt.Errorf("%w: incomplete create-client response", ErrResponse)
@@ -90,10 +92,12 @@ func (c *Client) ListZeroKMSClients(ctx context.Context, opts ListZeroKMSClients
 			return nil, fmt.Errorf("%w: keyset filter: %w", ErrConfig, err)
 		}
 	}
+
 	resp, err := c.zeroKMS.ListClientsWithResponse(ctx, input)
 	if err := checkResponse(serviceZeroKMS, resp, err); err != nil {
 		return nil, err
 	}
+
 	// A missing or null inventory is malformed; an empty array is not.
 	if resp.JSON200 == nil || *resp.JSON200 == nil {
 		return nil, fmt.Errorf("%w: missing client list", ErrResponse)
@@ -104,9 +108,11 @@ func (c *Client) ListZeroKMSClients(ctx context.Context, opts ListZeroKMSClients
 		if len(item.ID) != 36 || uuid.Validate(item.ID) != nil {
 			return nil, fmt.Errorf("%w: invalid client UUID", ErrResponse)
 		}
+
 		if item.Name == "" || item.Description == nil {
 			return nil, fmt.Errorf("%w: incomplete client metadata", ErrResponse)
 		}
+
 		// The service returns one keyset ID or an array of them.
 		ids, err := item.KeysetID.AsClientKeysetID1()
 		if err != nil {
@@ -114,18 +120,23 @@ func (c *Client) ListZeroKMSClients(ctx context.Context, opts ListZeroKMSClients
 			if err != nil {
 				return nil, fmt.Errorf("%w: invalid client keyset associations", ErrResponse)
 			}
+
 			ids = []string{id}
 		}
+
 		if ids == nil || slices.Contains(ids, "") {
 			return nil, fmt.Errorf("%w: missing client keyset association", ErrResponse)
 		}
+
 		for _, id := range ids {
 			if len(id) != 36 || uuid.Validate(id) != nil {
 				return nil, fmt.Errorf("%w: invalid client keyset UUID", ErrResponse)
 			}
 		}
+
 		clients = append(clients, ZeroKMSClient{ID: item.ID, Name: item.Name, Description: *item.Description, KeysetIDs: ids})
 	}
+
 	if err := checkInventoryDuplicates(resp.Body); err != nil {
 		return nil, err
 	}

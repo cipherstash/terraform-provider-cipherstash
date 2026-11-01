@@ -48,8 +48,10 @@ func (c *Client) CreateCTSActor(ctx context.Context, opts CreateCTSActorOptions)
 	if err := checkResponse(serviceCTS, resp, err); err != nil {
 		return nil, err
 	}
+
 	// The body contains the access key.
 	defer clear(resp.Body)
+
 	out := resp.JSON201
 	if out == nil || out.ActorID == "" || out.Name == "" || out.Kind == "" || out.Role == "" || out.AccessKey == "" {
 		return nil, fmt.Errorf("%w: incomplete create-actor response", ErrResponse)
@@ -76,16 +78,20 @@ func (c *Client) ListCTSActors(ctx context.Context, opts ListCTSActorsOptions) (
 	if opts.Limit != 0 {
 		params.Limit = &opts.Limit
 	}
+
 	if opts.Cursor != "" {
 		params.Cursor = &opts.Cursor
 	}
+
 	resp, err := c.cts.ListActorsWithResponse(ctx, &params)
 	if err := checkResponse(serviceCTS, resp, err); err != nil {
 		return CTSActorPage{}, err
 	}
+
 	if resp.JSON200 == nil || resp.JSON200.Items == nil {
 		return CTSActorPage{}, fmt.Errorf("%w: missing actor list", ErrResponse)
 	}
+
 	page := *resp.JSON200
 	for _, actor := range page.Items {
 		if actor.ID == "" || actor.Name == "" {
@@ -110,10 +116,12 @@ func (c *Client) ListCTSAccessKeys(ctx context.Context) ([]CTSAccessKeyMetadata,
 	if err := checkResponse(serviceCTS, resp, err); err != nil {
 		return nil, err
 	}
+
 	// A missing or null inventory is malformed; an empty array is not.
 	if resp.JSON200 == nil || *resp.JSON200 == nil {
 		return nil, fmt.Errorf("%w: missing access-key list", ErrResponse)
 	}
+
 	keys := *resp.JSON200
 	for _, key := range keys {
 		if key.ID == "" || key.Name == "" {
