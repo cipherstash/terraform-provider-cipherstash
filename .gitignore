@@ -8,3 +8,4 @@
 *.tfplan
 .env*
 crash.log
+.amp/portals/*

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Prepares a fresh Amp orb for this repository: installs mise and the Go,
+# Terraform and golangci-lint versions pinned in mise.toml and mise.test.toml,
+# downloads Go modules and compiles the race-enabled tests once so the first
+# `mise run check` reuses the build cache. Safe to rerun on a warm snapshot.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# Matches the mise version pinned in .github/workflows/tests.yml.
+mise_version=2026.4.0
+mise_bin="$HOME/.local/bin/mise"
+mise_paths='$HOME/.local/bin:$HOME/.local/share/mise/shims'
+export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+export MISE_YES=1
+
+step() {
+  printf '\n==> %s\n' "$1"
+  local start=$SECONDS
+  "${@:2}"
+  printf '==> %s done in %ss\n' "$1" "$((SECONDS - start))"
+}
+
+install_mise() {
+  if [[ "$("$mise_bin" --version 2>/dev/null)" == "$mise_version "* ]]; then
+    echo "mise $mise_version already installed"
+    return
+  fi
+  curl -fsSL https://mise.run | MISE_VERSION="v$mise_version" MISE_INSTALL_PATH="$mise_bin" sh
+}
+
+persist_path() {
+  # Amp and supervised services start in non-interactive login shells, where
+  # mise's prompt hook never runs. The shims resolve the pinned tools and the
+  # [env] section of mise.toml on every invocation instead.
+  local marker="# terraform-provider-cipherstash: mise shims"
+  if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    printf '\n%s\nexport PATH="%s:$PATH"\n' "$marker" "$mise_paths" >> "$HOME/.bash_profile"
+  fi
+}
+
+install_tools() {
+  mise trust --quiet mise.toml
+  mise trust --quiet mise.test.toml
+  # MISE_ENV=test adds golangci-lint from mise.test.toml, as in the CI lint job.
+  MISE_ENV=test mise install
+  mise reshim
+}
+
+warm_go() {
+  mise exec -- go mod download
+  mise exec -- go test -race -count=1 -run '^$' ./... > /dev/null
+}
+
+write_agent_guidance() {
+  local guidance="$HOME/.config/amp/AGENTS.md"
+  local marker="# terraform-provider-cipherstash orb notes"
+  mkdir -p "$(dirname "$guidance")"
+  if ! grep -Fqx "$marker" "$guidance" 2>/dev/null; then
+    cat >> "$guidance" <<EOF
+
+$marker
+
+- .agents/setup installed mise $mise_version and the tools pinned in mise.toml; \`go\` and \`terraform\` resolve through mise shims in login shells.
+- Run \`mise run check\` for the offline tests, vet and gofmt check that CI runs.
+- Run lint with \`MISE_ENV=test mise run lint\`; golangci-lint is pinned in mise.test.toml, which mise reads only when MISE_ENV=test.
+- Live acceptance tests (\`mise run test:acc\`) need TF_ACC=1 and CipherStash credentials; do not run them without approval.
+EOF
+  fi
+}
+
+step "Install mise $mise_version" install_mise
+step "Persist mise shims on login PATH" persist_path
+step "Install pinned tools" install_tools
+step "Download Go modules and compile tests" warm_go
+step "Write orb agent guidance" write_agent_guidance
