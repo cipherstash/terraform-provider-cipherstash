@@ -1,0 +1,61 @@
+name: Tests
+
+# check runs `mise run check`: the offline, race-enabled Go and Terraform CLI
+# tests, go vet and the gofmt check, with the Go and Terraform versions pinned
+# in mise.toml. The task clears TF_ACC, so the live acceptance test skips and
+# the job needs no CipherStash credentials. lint runs `mise run lint` with the
+# golangci-lint version pinned in mise.test.toml.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Tests, vet and formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          cache: true
+
+      - name: Check
+        run: mise run check
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # golangci-lint is pinned in mise.test.toml, which mise reads only in
+      # the test environment.
+      MISE_ENV: test
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          install_args: go golangci-lint
+          cache: true
+
+      - name: golangci-lint
+        run: mise run lint
