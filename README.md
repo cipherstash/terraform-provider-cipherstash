@@ -232,7 +232,7 @@ CLI tests use `resource.UnitTest`, so they run without live-acceptance opt-in. T
 
 The shared service fixture models inventory and HTTP faults, not Terraform plans or state. Unexpected endpoints, malformed requests, handler panics and unused fault injections fail tests independently of provider diagnostics. Default tests clear `TF_ACC`: plugin-testing treats any nonempty value, including `0`, as opt-in.
 
-Run just the CLI layer with `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1 -v`. These tests need only this checkout and the pinned tools. They establish neither live permissions nor live keyset/grant lifecycle behavior, and do not resolve licensing.
+Run just the CLI layer with `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1 -v`. These tests need only this checkout and the pinned tools. They establish neither live permissions nor live keyset/grant lifecycle behavior.
 
 Separate live checks verified that client creation without a specified keyset grants the default keyset, and that deleted clients disappear from inventory. Unique actor names returning 409 remain a fixture assumption, not recorded live proof. Removing a client from the fixture makes its grants unobservable; this does not prove deletion of grant records on the service. Real Admin and Control re-grant probes returned 500 with the default grant unchanged.
 
@@ -244,6 +244,6 @@ There is no default acceptance workspace. The task refuses to run without opt-in
 
 ## Distribution and licensing
 
-Public source visibility does not grant a provider license, and this repository does not assert one. The provider no longer embeds the external SDK's WebAssembly authentication guest. This change does not establish licensing or redistribution rights for the provider or its dependencies.
+This repository is licensed under the [MIT License](LICENSE.md), the same licence as [cipherstash/stack](https://github.com/cipherstash/stack). The licence covers the provider and the public `pkg/stack/auth` and `pkg/stack/manage` packages. Go module dependencies keep their own licences.
 
-Release automation, signing and publication are outside this development build workflow. Do not publish provider binaries or Terraform Registry artifacts based on this repository's visibility.
+Release automation, signing and publication are outside this development build workflow. This repository publishes no provider binaries or Terraform Registry artifacts.

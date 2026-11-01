@@ -3,7 +3,7 @@
 page_title: "cipherstash Provider"
 description: |-
   Use the CipherStash provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a workspace. Configure a separate provider instance for each workspace. See the workspace documentation https://cipherstash.com/docs/reference/workspace for the CipherStash concepts.
-  This provider is in development and is not published to the Terraform Registry. It uses this repository's public pkg/stack/auth and pkg/stack/manage Go packages. Builds require no BNDRY module, sibling SDK checkout, local module replacement or WebAssembly guest. Provider licensing remains unresolved.
+  This provider is in development and is not published to the Terraform Registry. It uses this repository's public pkg/stack/auth and pkg/stack/manage Go packages. Builds require no BNDRY module, sibling SDK checkout, local module replacement or WebAssembly guest. The provider is licensed under the MIT License.
   Authenticate with an Admin access key. The provider requires a verified Admin role even for configurations that manage only ZeroKMS resources or read data sources. Successful configuration does not prove permission for every operation. Create this credential outside the Terraform configuration that uses it. Resource access keys and client key values are stored in Terraform state and saved plans, even when marked sensitive. Protect these files and your state backend.
   Neither the provider nor manage.Config reads CS_CLIENT_ID: it identifies an application encryption client, not an authentication principal. Manage client/keyset pairs explicitly with cipherstash_zerokms_keyset_grant.
 ---
@@ -12,7 +12,7 @@ description: |-
 
 Use the CipherStash provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a workspace. Configure a separate provider instance for each workspace. See the [workspace documentation](https://cipherstash.com/docs/reference/workspace) for the CipherStash concepts.
 
-This provider is in development and is not published to the Terraform Registry. It uses this repository's public pkg/stack/auth and pkg/stack/manage Go packages. Builds require no BNDRY module, sibling SDK checkout, local module replacement or WebAssembly guest. Provider licensing remains unresolved.
+This provider is in development and is not published to the Terraform Registry. It uses this repository's public pkg/stack/auth and pkg/stack/manage Go packages. Builds require no BNDRY module, sibling SDK checkout, local module replacement or WebAssembly guest. The provider is licensed under the MIT License.
 
 Authenticate with an Admin access key. The provider requires a verified Admin role even for configurations that manage only ZeroKMS resources or read data sources. Successful configuration does not prove permission for every operation. Create this credential outside the Terraform configuration that uses it. Resource access keys and client key values are stored in Terraform state and saved plans, even when marked sensitive. Protect these files and your state backend.
 
