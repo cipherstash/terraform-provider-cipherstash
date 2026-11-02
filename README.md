@@ -84,6 +84,8 @@ A new ZeroKMS client receives a grant to the workspace's default keyset. The cli
 
 Use `cipherstash_zerokms_keyset_grant` to manage any grant explicitly, including the automatic default grant. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state.
 
+CipherStash refuses to revoke a client's creation grant: the grant to the keyset the client was created with, which is the workspace's default keyset unless another was chosen. The revoke request returns HTTP 400, so destroying a grant resource for that pair fails with "Cannot revoke keyset grant" and keeps the pair in state. To remove that access, delete the client. Every other grant can be revoked.
+
 Client refresh and import never add, restore or revoke grants. Use the existing `cipherstash_zerokms_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
 
 Replacing a client creates a different identity. Grants associated with the old client are not transferred to it. Plan credential and grant changes separately; consider `lifecycle { prevent_destroy = true }` for an established client. This provider does not implement an application cutover or prove that deleting a client physically removes every grant record on the service.
@@ -175,15 +177,24 @@ A grant's ID is known before the request because it is the client/keyset pair. A
 
 ### Live verification limits
 
-**Live API probes are not full Terraform keyset/grant lifecycle verification.** On 2026-10-30, isolated Development probes created, enabled and disabled a test keyset, and successfully added and revoked an additional grant while the client's creation/default grant remained. Revoking the creation/default grant while another grant remained returned HTTP 500. Revoking a final grant to a non-workspace-default keyset also returned HTTP 500; that keyset was the client's creation keyset. Inventory confirmed both failed revocations left the grants present. The cause remains unresolved; these observations do not establish that all revokes fail or that removing only the last grant is the problem. No provider workaround is justified by this evidence.
+**Live API probes are not full Terraform keyset/grant lifecycle verification.** On 2026-10-30, isolated Development probes found that revoking a client's creation grant returned HTTP 500, both while another grant remained and when it was the client's only grant. CipherStash then changed the service. On 2026-11-02, the same probes, run with Admin and Control keys through `pkg/stack/manage`, observed:
 
-Those probes deleted their test clients and preserved existing resources. Test keyset `9fc1fcf6-da8a-4b8f-abdc-aae2405d6651` remains disabled because keysets cannot be deleted. Do not rely on creation-grant removal as part of an automated lifecycle until the failure is resolved. Exercise the actual Terraform keyset/grant lifecycle before production use; the successful API probes do not replace that check.
+| Request | Response |
+| --- | --- |
+| Grant a keyset the client already has | HTTP 409, `Client already has access to this keyset` |
+| Revoke a grant added after creation | HTTP 200; the grant leaves inventory |
+| Revoke the creation grant: on the default keyset with and without another grant, and as the only grant on a non-default keyset | HTTP 400, `Cannot revoke a client's default keyset (the keyset it was created with); delete the client instead` |
+| Revoke a grant the client no longer has | HTTP 404 |
+
+Error bodies are plain text. Inventory confirmed that refused requests left grants unchanged. The provider does not show response bodies in diagnostics, so Terraform reports only that the request failed.
+
+The probes deleted their test clients and preserved existing resources. Test keyset `9fc1fcf6-da8a-4b8f-abdc-aae2405d6651` and the keysets named `adhoc-grant-probe-*` remain disabled because keysets cannot be deleted. Exercise the actual Terraform keyset/grant lifecycle before production use; the API probes do not replace that check.
 
 Before the BNDRY migration, on 2026-10-30, the native-backed actor/client acceptance test passed creation, refresh, UUID and legacy-pair imports, replacement and deletion in workspace `2JTSJCX24VP2WCBC`. Actor, access-key and client IDs matched the pre-test baseline afterward. A subsequent direct `internal/stack` client test verified Admin authentication, client creation, metadata and grant inventory, filtering, one-time key export and deletion. Go and the published Rust protocol decoder accepted the live inventories, including scalar and array grant representations. Complete client/keyset inventories matched that run's baseline afterward: two clients and nine keysets, eight disabled. No new lasting resource was created by that run.
 
 The BNDRY-backed provider repeated the actor/client Terraform acceptance test on 2026-10-30 in Development workspace `2JTSJCX24VP2WCBC`, using a temporary module replacement for the local inventory-hardening fix. Creation, refresh, UUID and legacy-pair imports, replacement and deletion passed; actor, access-key and client IDs matched the baseline afterward. This run did not repeat the keyset/grant lifecycle or validate a published dependency containing that fix.
 
-Live zero-grant inventory representation remains unverified. Offline Terraform CLI tests cover zero-grant import and refresh; accepting an empty array in a fixture is not live evidence. None of these checks establishes immediate credential invalidation after deletion; see the actor-key observation above. Client-key seeding checks format and the asserted UUID, not cryptographic key/client correspondence.
+Live zero-grant inventory representation remains unverified, and revocation cannot produce a zero-grant client because the creation grant cannot be revoked. Offline Terraform CLI tests cover zero-grant import and refresh; accepting an empty array in a fixture is not live evidence. None of these checks establishes immediate credential invalidation after deletion; see the actor-key observation above. Client-key seeding checks format and the asserted UUID, not cryptographic key/client correspondence.
 
 ### Preserve existing configuration
 
@@ -234,7 +245,7 @@ The shared service fixture models inventory and HTTP faults, not Terraform plans
 
 Run just the CLI layer with `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1 -v`. These tests need only this checkout and the pinned tools. They establish neither live permissions nor live keyset/grant lifecycle behavior.
 
-Separate live checks verified that client creation without a specified keyset grants the default keyset, and that deleted clients disappear from inventory. Unique actor names returning 409 remain a fixture assumption, not recorded live proof. Removing a client from the fixture makes its grants unobservable; this does not prove deletion of grant records on the service. Real Admin and Control re-grant probes returned 500 with the default grant unchanged.
+Separate live checks verified that client creation without a specified keyset grants the default keyset, and that deleted clients disappear from inventory. Unique actor names returning 409 remain a fixture assumption, not recorded live proof. Removing a client from the fixture makes its grants unobservable; this does not prove deletion of grant records on the service. Real Admin and Control re-grant probes returned HTTP 409 with the grant unchanged.
 
 ### Run approved live acceptance tests
 
