@@ -17,7 +17,8 @@ Terraform provider for CipherStash plus the public Go packages it uses. It is in
 | `mise run check` | Race-enabled offline tests, `go vet` and the gofmt check; the first CI job. Takes several minutes because the CLI tests run real `terraform` commands. |
 | `mise run --env test lint` | golangci-lint; the second CI job. `mise exec --env test -- golangci-lint run --fix ./...` fixes most findings. |
 | `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1` | Only the Terraform CLI tests. Narrow `-run` further while iterating. |
-| `mise run docs` | Regenerates `docs/`. |
+| `mise run codegen` | Runs `go generate ./...`, which regenerates `docs/` and the API clients. |
+| `mise run --env docs site` | Builds the Zensical site from `docs/` (tools in `mise.docs.toml`); the Docs workflow publishes it to `gh-pages` from `main`. |
 | `mise run build` / `mise run install-local` | Builds the provider, or installs it into a local mirror under `.local/`. |
 
 Never run `mise run test:acc` or set `TF_ACC=1` without explicit approval. Live acceptance tests create and destroy real actors and clients in a shared CipherStash workspace. Every other test is offline and needs no network access or secrets.
@@ -26,7 +27,7 @@ Lint is stricter than `check`: it formats with gofumpt rather than gofmt, requir
 
 ## Generated files
 
-`docs/` comes from the `Description` strings in the schemas; change the Go descriptions, run `mise run docs` and commit the pages with the source change. `pkg/stack/internal/*/client.gen.go` comes from `go generate` (see `pkg/stack/AGENTS.md`). After running either generator, `git status` must show only the changes you intended; a clean tree is the drift check.
+`mise run codegen` runs every `go:generate` directive. `docs/` comes from the `Description` strings in the schemas through the tfplugindocs directive in `main.go`; change the Go descriptions, run `mise run codegen` and commit the pages with the source change. `pkg/stack/internal/*/client.gen.go` comes from the oapi-codegen directives (see `pkg/stack/AGENTS.md`). After regenerating, `git status` must show only the changes you intended; CI's Generated files job fails on any drift.
 
 ## Provider conventions
 

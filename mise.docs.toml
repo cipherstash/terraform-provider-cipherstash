@@ -1,0 +1,14 @@
+# Docs site tooling, active only with MISE_ENV=docs (or `mise run --env docs`).
+# mise installs these Python tools with the pinned uv.
+[tools]
+uv = "0.13.6"
+"pipx:zensical" = "0.0.74"
+"pipx:ghp-import" = "2.1.0"
+
+[tasks.site]
+description = "Build the docs site from docs/ into site/"
+run = "zensical build --clean --strict"
+
+[tasks."site:serve"]
+description = "Preview the docs site locally"
+run = "zensical serve"

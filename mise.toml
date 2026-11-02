@@ -33,9 +33,9 @@ fi
 description = "Run non-mutating local tests, vet and formatting checks"
 depends = ["test", "vet", "fmt-check"]
 
-[tasks.docs]
-description = "Regenerate provider reference documentation with pinned tfplugindocs"
-run = "go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@v0.25.0 generate --provider-name cipherstash"
+[tasks.codegen]
+description = "Regenerate docs/ and the generated API clients with go generate"
+run = "go generate ./..."
 
 [tasks.install-local]
 description = "Build and install the development provider into the local Terraform mirror"

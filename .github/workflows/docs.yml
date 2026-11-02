@@ -1,0 +1,52 @@
+name: Docs
+
+# Builds docs/ with Zensical (zensical.toml, tools pinned in mise.docs.toml)
+# and pushes the site to the gh-pages branch, which GitHub Pages serves. Each
+# deploy replaces the branch with a single commit. The Tests workflow's
+# Generated files job keeps docs/ in sync with the schema descriptions.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - zensical.toml
+      - mise.docs.toml
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to gh-pages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      # ghp-import pushes the gh-pages branch with the job token.
+      contents: write
+    env:
+      MISE_ENV: docs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          install_args: uv pipx:zensical pipx:ghp-import
+          cache: true
+
+      - name: Build
+        run: mise run site
+
+      - name: Publish
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mise exec -- ghp-import --no-jekyll --force --push --message "Deploy ${GITHUB_SHA} with Zensical" site

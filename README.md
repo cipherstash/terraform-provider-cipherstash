@@ -223,8 +223,9 @@ A lockfile generated from the local mirror describes your local build, not a pub
 | `mise run check` | Runs race-enabled tests, Go vet, and Go formatting checks without changing tracked files or contacting live services. |
 | `mise run test` | Runs offline Terraform CLI and fixture tests with `TF_ACC` cleared, even if acceptance is enabled in your shell. The race detector needs a C toolchain. |
 | `mise run build` | Builds the local provider binary. |
-| `mise run docs` | Generates reference pages from Go schema descriptions using tfplugindocs 0.25.0. Edit those descriptions, not `docs/` directly. |
+| `mise run codegen` | Runs `go generate ./...`: generates reference pages from Go schema descriptions using tfplugindocs 0.25.0, and the API clients under `pkg/stack/internal` using oapi-codegen. Edit those descriptions, not `docs/` directly. CI fails if the committed files differ from the output. |
 | `mise run --env test lint` | Runs optional golangci-lint 2.14.0 from `mise.test.toml`. It is separate from `check`. |
+| `mise run --env docs site` | Builds the documentation site from `docs/` with Zensical, pinned in `mise.docs.toml`, into `site/`. `mise run --env docs site:serve` previews it. The Docs workflow publishes it to the `gh-pages` branch when `docs/` changes on `main`. |
 
 Documentation generation and live acceptance are not part of `check`. This repository does not configure Rust, guest builds, or local services, and does not force `CGO_ENABLED=0`.
 

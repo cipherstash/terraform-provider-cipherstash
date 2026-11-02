@@ -4,7 +4,9 @@ name: Tests
 # tests, go vet and the gofmt check, with the Go and Terraform versions pinned
 # in mise.toml. The task clears TF_ACC, so the live acceptance test skips and
 # the job needs no CipherStash credentials. lint runs `mise run lint` with the
-# golangci-lint version pinned in mise.test.toml.
+# golangci-lint version pinned in mise.test.toml. generated runs
+# `mise run codegen` (go generate for docs/ and the API clients) and fails if
+# it changes the tree.
 
 on:
   pull_request:
@@ -59,3 +61,30 @@ jobs:
 
       - name: golangci-lint
         run: mise run lint
+
+  generated:
+    name: Generated files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          cache: true
+
+      - name: Regenerate
+        run: mise run codegen
+
+      - name: Check for drift
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git status --short
+            git diff
+            echo "::error::Generated files are out of date. Run 'mise run codegen' and commit the result."
+            exit 1
+          fi

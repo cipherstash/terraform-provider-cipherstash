@@ -9,3 +9,4 @@
 .env*
 crash.log
 .amp/portals/*
+/site/

@@ -1,0 +1,14 @@
+# Renders the generated provider reference in docs/ as the GitHub Pages site.
+# Navigation comes from the docs/ tree and each page's heading, so new
+# resources need no change here.
+[project]
+site_name = "CipherStash Terraform Provider"
+site_url = "https://cipherstash.github.io/terraform-provider-cipherstash/"
+repo_url = "https://github.com/cipherstash/terraform-provider-cipherstash"
+repo_name = "cipherstash/terraform-provider-cipherstash"
+
+[project.theme]
+features = [
+  "navigation.sections",
+  "content.code.copy",
+]

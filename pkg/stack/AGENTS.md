@@ -26,7 +26,7 @@ Keep these when changing the code. Most have tests in `auth/*_test.go` and `mana
 `internal/cts` and `internal/zerokms` each hold a vendor OpenAPI spec (`openapi.yaml`), an overlay (`overlay.yaml`), an oapi-codegen config (`oapi-codegen.yaml`) and the generated `client.gen.go`.
 
 - Never edit `client.gen.go` or `openapi.yaml` by hand. The spec stays exactly as CipherStash publishes it; local changes go in `overlay.yaml`, and generator options, including the `include-operation-ids` allowlist, go in `oapi-codegen.yaml`.
-- Regenerate with `mise exec -- go generate ./pkg/stack/...`. oapi-codegen is a Go `tool` dependency in `go.mod`.
+- Regenerate with `mise run codegen`. oapi-codegen is a Go `tool` dependency in `go.mod`.
 - `manage/types.go` aliases generated types into the public API, so changes to `overlay.yaml` or `oapi-codegen.yaml` (names, fields, pointer choices, `name-normalizer`) are public API changes.
 
 ## Tests
