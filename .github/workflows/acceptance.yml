@@ -1,0 +1,44 @@
+name: Acceptance
+
+# Runs the live actor/client acceptance test (`mise run test:acc`) against the
+# workspace in the CS_WORKSPACE_CRN and CS_CLIENT_ACCESS_KEY repository
+# secrets. The test creates and destroys real objects in a shared workspace,
+# so it runs only on main and on demand, one run at a time, and a running job
+# is never cancelled: cancelling mid-run would orphan test-owned objects.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    name: Live acceptance
+    # Forks have no access to the secrets.
+    if: github.repository == 'cipherstash/terraform-provider-cipherstash'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          cache: true
+
+      - name: Acceptance
+        env:
+          TF_ACC: "1"
+          TF_ACC_CRN: ${{ secrets.CS_WORKSPACE_CRN }}
+          CS_CLIENT_ACCESS_KEY: ${{ secrets.CS_CLIENT_ACCESS_KEY }}
+        run: TF_ACC_WORKSPACE_ID="${TF_ACC_CRN##*:}" mise run test:acc
