@@ -84,7 +84,7 @@ A new ZeroKMS client receives a grant to the workspace's default keyset. The cli
 
 Use `cipherstash_zerokms_keyset_grant` to manage any grant explicitly, including the automatic default grant. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state.
 
-CipherStash refuses to revoke a client's creation grant: the grant to the keyset the client was created with, which is the workspace's default keyset unless another was chosen. The revoke request returns HTTP 400, so destroying a grant resource for that pair fails with "Cannot revoke keyset grant" and keeps the pair in state. To remove that access, delete the client. Every other grant can be revoked.
+CipherStash refuses to revoke a client's creation grant: the grant to the keyset the client was created with, which is the workspace's default keyset unless another was chosen. The revoke request returns HTTP 400, so destroying a grant resource for that pair fails with "Cannot revoke keyset grant", reports that CipherStash rejected the request as invalid (HTTP 400), and keeps the pair in state. To remove that access, delete the client. Every other grant can be revoked.
 
 Client refresh and import never add, restore or revoke grants. Use the existing `cipherstash_zerokms_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
 
@@ -186,7 +186,7 @@ A grant's ID is known before the request because it is the client/keyset pair. A
 | Revoke the creation grant: on the default keyset with and without another grant, and as the only grant on a non-default keyset | HTTP 400, `Cannot revoke a client's default keyset (the keyset it was created with); delete the client instead` |
 | Revoke a grant the client no longer has | HTTP 404 |
 
-Error bodies are plain text. Inventory confirmed that refused requests left grants unchanged. The provider does not show response bodies in diagnostics, so Terraform reports only that the request failed.
+Error bodies are plain text. Inventory confirmed that refused requests left grants unchanged. The provider does not show response bodies in diagnostics, so Terraform reports only the category: HTTP 400 as an invalid request, 409 as a conflict and 404 as not found.
 
 The probes deleted their test clients and preserved existing resources. Test keyset `9fc1fcf6-da8a-4b8f-abdc-aae2405d6651` and the keysets named `adhoc-grant-probe-*` remain disabled because keysets cannot be deleted. Exercise the actual Terraform keyset/grant lifecycle before production use; the API probes do not replace that check.
 

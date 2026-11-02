@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 
@@ -212,7 +213,10 @@ func clientFromProviderData(data any) (controlClient, error) {
 
 // Never render upstream error text: service responses can echo submitted data.
 func operationError(err error) string {
+	httpErr, _ := errors.AsType[*control.HTTPError](err)
 	switch {
+	case httpErr != nil && httpErr.StatusCode == http.StatusBadRequest:
+		return "CipherStash rejected the request as invalid (HTTP 400). Retrying it unchanged will fail the same way."
 	case errors.Is(err, control.ErrForbidden):
 		return "CipherStash denied this operation. Check the Admin credential and its permissions."
 	case errors.Is(err, control.ErrAuthentication):

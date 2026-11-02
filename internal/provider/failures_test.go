@@ -277,6 +277,25 @@ func TestSDKGrantUncertainWrites(t *testing.T) {
 	}
 }
 
+// CipherStash answers 400 when asked to revoke a client's creation grant.
+func TestSDKGrantRevokeRejectedAsInvalid(t *testing.T) {
+	f := newServiceFixture(t)
+	f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+	f.faults = []serviceFault{{path: "/revoke-keyset", status: http.StatusBadRequest}}
+	r := &keysetGrantResource{client: fixtureClient(t, fixtureTransport(t, "admin", f.ServeHTTP))}
+	before := resourceState(t, r, keysetGrantModel{ID: types.StringValue(clientID + "/" + keysetID), ClientID: types.StringValue(clientID), KeysetID: types.StringValue(keysetID)})
+
+	resp := resource.DeleteResponse{State: before}
+	r.Delete(context.Background(), resource.DeleteRequest{State: before}, &resp)
+
+	require.Equal(t, 1, resp.Diagnostics.ErrorsCount(), "%v", resp.Diagnostics)
+	require.Equal(t, "CipherStash rejected the request as invalid (HTTP 400). Retrying it unchanged will fail the same way. The pair still exists and is retained in state.", resp.Diagnostics[0].Detail())
+	require.True(t, resp.State.Raw.Equal(before.Raw), "rejected revocation changed state")
+	f.edit(func() {
+		assert.Equal(t, []string{keysetID, tenantKeysetID}, f.clients[0].KeysetIDs)
+	})
+}
+
 func TestSDKKeysetDestroyConfirmation(t *testing.T) {
 	f := newServiceFixture(t)
 	f.faults = []serviceFault{{path: "/list-keysets", skip: 1, status: 500}}
