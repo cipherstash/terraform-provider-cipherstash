@@ -254,6 +254,8 @@ Live actor/client tests use `terraform-plugin-testing`. Coordinate access to the
 
 There is no default acceptance workspace. The task refuses to run without opt-in, and the test rejects a missing workspace ID, mismatched CRN, or missing credential before opening authentication. It creates uniquely named `tf-acc-*` actors and clients, checks refresh/import/replacement, destroys them, and compares actor, access-key, and client IDs against the initial inventory. It does not separately mutate keysets or grants.
 
+The Acceptance workflow runs this test on pushes to `main` and on manual dispatch, one run at a time, using the `CS_WORKSPACE_CRN` and `CS_CLIENT_ACCESS_KEY` repository secrets. Pull requests run only the offline suite.
+
 ## Distribution and licensing
 
 This repository is licensed under the [MIT License](LICENSE.md), the same licence as [cipherstash/stack](https://github.com/cipherstash/stack). The licence covers the provider and the public `pkg/stack/auth` and `pkg/stack/manage` packages. Go module dependencies keep their own licences.
