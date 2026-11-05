@@ -6,6 +6,7 @@ Terraform provider for CipherStash plus the public Go packages it uses. It is in
 
 - `internal/provider`: the provider, its resources and data source, and the offline test suite. `main.go` serves it.
 - `internal/eql`: the EQL v4 installers, compiled in from `bundles/<version>/eql-v4-install.sql` (byte-for-byte release assets, listed with their release tags and SHA-256 digests in `releases.json`, which a test checks). Until cipherstash/stack has a stable Go release, ship only the latest release candidate and the one before it: adding a release removes the oldest bundle and its manifest entry, and the SQL that inspects and installs them.
+- `examples/`: complete Terraform configurations. `templates/guides/` holds the guides tfplugindocs renders into `docs/guides/`; a guide embeds an example with `{{ tffile "examples/<name>/main.tf" }}`.
 - `pkg/stack/auth` and `pkg/stack/manage`: public packages that other projects also import. `pkg/stack` has its own AGENTS.md.
 - `docs/`: generated from the schema descriptions. Never edit it by hand.
 
@@ -19,6 +20,7 @@ Terraform provider for CipherStash plus the public Go packages it uses. It is in
 | `mise run --env test lint` | golangci-lint; the second CI job. `mise exec --env test -- golangci-lint run --fix ./...` fixes most findings. |
 | `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1` | Only the Terraform CLI tests. Narrow `-run` further while iterating. |
 | `mise run test:postgres` | Tests named `*Postgres*` against the superuser URL in `CS_TEST_POSTGRES_URL`; the CI `postgres` job runs it on PostgreSQL 16 and 17. Each test creates and drops its own database and roles. It passes `-rapid.checks` and `-rapid.steps` to bound the upgrade state machine; running that test without them takes rapid's defaults of 100 traces of about 30 Terraform actions. |
+| `mise run examples:validate` | `terraform validate` on each `examples/` directory using the local mirror; needs network access for other providers. `check` runs `terraform fmt -check` on `examples/`. |
 | `mise run codegen` | Runs `go generate ./...`, which regenerates `docs/` and the API clients. |
 | `mise run --env docs site` | Builds the Zensical site from `docs/` (tools in `mise.docs.toml`); the Docs workflow publishes it to `gh-pages` from `main`. |
 | `mise run build` / `mise run install-local` | Builds the provider, or installs it into a local mirror under `.local/`. |

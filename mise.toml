@@ -19,7 +19,7 @@ description = "Run Go vet"
 run = "go vet ./..."
 
 [tasks.fmt-check]
-description = "Check Go formatting without modifying files"
+description = "Check Go and example Terraform formatting without modifying files"
 run = '''
 set -eu
 unformatted=$(gofmt -l .)
@@ -27,6 +27,7 @@ if [ -n "$unformatted" ]; then
   printf '%s\n' "$unformatted"
   exit 1
 fi
+terraform fmt -check -recursive examples
 '''
 
 [tasks.check]
@@ -63,6 +64,18 @@ go test -race ./internal/eql -run Postgres -count=1
 # The upgrade model runs Terraform per step, so bound rapid's budget: 10 random
 # traces of about 10 actions, after its fixed traces of every upgrade path.
 TF_ACC= go test -race ./internal/provider -run Postgres -count=1 -rapid.checks=10 -rapid.steps=10
+'''
+
+[tasks."examples:validate"]
+description = "Validate each example against the locally installed provider (downloads other providers)"
+depends = ["install-local"]
+run = '''
+set -eu
+export TF_CLI_CONFIG_FILE="$PWD/.local/terraform.rc"
+for dir in examples/*/; do
+  terraform -chdir="$dir" init -backend=false -input=false
+  terraform -chdir="$dir" validate
+done
 '''
 
 [tasks."test:acc"]

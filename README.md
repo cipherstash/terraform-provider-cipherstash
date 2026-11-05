@@ -1,6 +1,6 @@
 # Terraform provider for CipherStash
 
-Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace, and to install EQL v4 into PostgreSQL databases. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; this repository's `pkg/stack/auth` and `pkg/stack/manage` packages handle authentication and service requests.
+Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace, and to install EQL v4 into PostgreSQL databases. You can also look up an existing client without managing it. The guide [Prepare CipherStash and PostgreSQL for encrypted data with Terraform](docs/guides/eql-quickstart.md) walks through both. The provider handles Terraform configuration and state; this repository's `pkg/stack/auth` and `pkg/stack/manage` packages handle authentication and service requests.
 
 **This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. No BNDRY module, sibling SDK checkout, local module replacement, Rust toolchain or WebAssembly authentication guest is required. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
 
@@ -313,7 +313,7 @@ Live zero-grant inventory representation remains unverified, and revocation cann
 
 ### Preserve existing configuration
 
-The repository's example configurations have been removed. If you used them, preserve your configuration and state until you have planned a migration. Do not apply an emptied root against retained state: Terraform would plan to destroy the resources it no longer sees in configuration.
+The repository's earlier example configurations have been removed; `examples/eql-quickstart` is the configuration from the EQL guide and is not a replacement for them. If you used the earlier examples, preserve your configuration and state until you have planned a migration. Do not apply an emptied root against retained state: Terraform would plan to destroy the resources it no longer sees in configuration.
 
 ## Develop and verify locally
 
@@ -335,9 +335,10 @@ A lockfile generated from the local mirror describes your local build, not a pub
 
 | Command | What it does |
 | --- | --- |
-| `mise run check` | Runs race-enabled tests, Go vet, and Go formatting checks without changing tracked files or contacting live services. |
+| `mise run check` | Runs race-enabled tests, Go vet, and Go and `examples/` Terraform formatting checks without changing tracked files or contacting live services. |
 | `mise run test` | Runs offline Terraform CLI and fixture tests with `TF_ACC` cleared, even if acceptance is enabled in your shell. The race detector needs a C toolchain. |
 | `mise run test:postgres` | Runs the EQL installation tests against the PostgreSQL superuser connection in `CS_TEST_POSTGRES_URL`. Each test creates and drops its own database and roles. It limits the upgrade model to 10 random traces of about 10 actions, after its fixed traces. |
+| `mise run examples:validate` | Installs the provider into the local mirror and runs `terraform validate` on each directory in `examples/`. It downloads the other providers the examples use. |
 | `mise run build` | Builds the local provider binary. |
 | `mise run codegen` | Runs `go generate ./...`: generates reference pages from Go schema descriptions using tfplugindocs 0.25.0, and the API clients under `pkg/stack/internal` using oapi-codegen. Edit those descriptions, not `docs/` directly. CI fails if the committed files differ from the output. |
 | `mise run --env test lint` | Runs optional golangci-lint 2.14.0 from `mise.test.toml`. It is separate from `check`. |

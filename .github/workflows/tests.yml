@@ -1,11 +1,12 @@
 name: Tests
 
 # check runs `mise run check`: the offline, race-enabled Go and Terraform CLI
-# tests, go vet and the gofmt check, with the Go and Terraform versions pinned
-# in mise.toml. The task clears TF_ACC, so the live acceptance test skips and
-# the job needs no CipherStash credentials. postgres runs `mise run
-# test:postgres`, the EQL install tests, against a PostgreSQL service container
-# for each supported major version. lint runs `mise run lint` with the
+# tests, go vet, the gofmt check and `terraform fmt -check` on examples/, with
+# the Go and Terraform versions pinned in mise.toml. The task clears TF_ACC, so
+# the live acceptance test skips and the job needs no CipherStash credentials.
+# postgres runs `mise run test:postgres`, the EQL install tests, against a
+# PostgreSQL service container for each supported major version, then
+# validates examples/ against the locally built provider. lint runs `mise run lint` with the
 # golangci-lint version pinned in mise.test.toml. generated runs
 # `mise run codegen` (go generate for docs/ and the API clients) and fails if
 # it changes the tree.
@@ -99,6 +100,9 @@ jobs:
 
       - name: PostgreSQL tests
         run: mise run test:postgres
+
+      - name: Validate examples
+        run: mise run examples:validate
 
   generated:
     name: Generated files
