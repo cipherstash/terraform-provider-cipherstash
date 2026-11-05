@@ -4,6 +4,8 @@
 // Go releases, checked in byte for byte under bundles/<version>/ and listed in
 // releases.json. Each installer drops and re-creates the eql_v4 and eql_v4_internal
 // schemas, so Install only ever runs against a database without EQL v4.
+//
+// Every other statement is in queries.sql, from which sqlc generates internal/db.
 package eql
 
 import (
@@ -18,6 +20,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/cipherstash/terraform-provider-cipherstash/internal/eql/internal/db"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -25,13 +28,6 @@ const (
 	// Schema and InternalSchema are the schemas every EQL v4 installer creates.
 	Schema         = "eql_v4"
 	InternalSchema = "eql_v4_internal"
-
-	// The same advisory lock key as the stash CLI's EQL installer, so the two
-	// never install concurrently.
-	lockKey = "cipherstash.eql.lifecycle"
-
-	lockTimeout      = "5s"
-	statementTimeout = "10min"
 )
 
 //go:embed bundles/*/eql-v4-install.sql
@@ -161,59 +157,33 @@ type Installation struct {
 	PgcryptoSchema string
 }
 
-type querier interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
 // Inspect reads the EQL v4 installation in the connected database. It only reads.
 func Inspect(ctx context.Context, conn *pgx.Conn) (Installation, error) {
-	return inspect(ctx, conn)
+	return inspect(ctx, db.New(conn))
 }
 
-func inspect(ctx context.Context, q querier) (Installation, error) {
-	var (
-		inst                   Installation
-		hasSchema, hasInternal bool
-		hasVersion             bool
-		pgcryptoSchema, owner  *string
-	)
-
-	err := q.QueryRow(ctx, `
-SELECT to_regnamespace('eql_v4') IS NOT NULL,
-       to_regnamespace('eql_v4_internal') IS NOT NULL,
-       to_regprocedure('eql_v4.version()') IS NOT NULL,
-       (SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pgcrypto'),
-       (SELECT nspowner::regrole::text FROM pg_namespace WHERE nspname = 'eql_v4')`).
-		Scan(&hasSchema, &hasInternal, &hasVersion, &pgcryptoSchema, &owner)
+func inspect(ctx context.Context, q *db.Queries) (Installation, error) {
+	schemas, err := q.InspectSchemas(ctx)
 	if err != nil {
 		return Installation{}, fmt.Errorf("eql: inspect schemas: %w", err)
 	}
 
-	if pgcryptoSchema != nil {
-		inst.PgcryptoSchema = *pgcryptoSchema
-	}
-
-	if !hasSchema && !hasInternal {
+	inst := Installation{PgcryptoSchema: schemas.PgcryptoSchema}
+	if !schemas.HasSchema && !schemas.HasInternalSchema {
 		return inst, nil
 	}
 
-	if !hasSchema || !hasInternal || !hasVersion {
+	if !schemas.HasSchema || !schemas.HasInternalSchema || !schemas.HasVersion {
 		return inst, ErrPartial
 	}
 
-	inst.Installed = true
-	inst.Owner = *owner
-
-	err = q.QueryRow(ctx, `
-SELECT eql_v4.version(),
-       EXISTS (SELECT FROM pg_opclass
-               WHERE opcname = 'ore_block_v2_operator_class'
-                 AND opcnamespace = 'eql_v4_internal'::regnamespace)
-       AND NOT EXISTS (SELECT FROM pg_constraint WHERE conname = 'eql_ore_unavailable')`).
-		Scan(&inst.Version, &inst.OREAvailable)
+	installation, err := q.InspectInstallation(ctx)
 	if err != nil {
 		return Installation{}, fmt.Errorf("eql: inspect installation: %w", err)
 	}
+
+	inst.Installed, inst.Owner = true, schemas.Owner
+	inst.Version, inst.OREAvailable = installation.Version, installation.OreAvailable
 
 	return inst, nil
 }
@@ -241,8 +211,9 @@ func Install(ctx context.Context, conn *pgx.Conn, version string, requireORE boo
 	// Rollback after Commit is a no-op; its error carries no information.
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var locked bool
-	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtext($1))`, lockKey).Scan(&locked); err != nil {
+	q := db.New(tx)
+	locked, err := q.TryLifecycleLock(ctx)
+	if err != nil {
 		return fmt.Errorf("eql: lock: %w", err)
 	}
 
@@ -250,20 +221,11 @@ func Install(ctx context.Context, conn *pgx.Conn, version string, requireORE boo
 		return ErrLocked
 	}
 
-	// The installer creates its operators unqualified, in the first schema on
-	// search_path, and its ORE operator class refers to them as public.<.
-	for _, setting := range []string{
-		`SET LOCAL search_path = public`,
-		`SET LOCAL jit = off`,
-		`SET LOCAL lock_timeout = '` + lockTimeout + `'`,
-		`SET LOCAL statement_timeout = '` + statementTimeout + `'`,
-	} {
-		if _, err := tx.Exec(ctx, setting); err != nil {
-			return fmt.Errorf("eql: configure transaction: %w", err)
-		}
+	if err := q.ConfigureTransaction(ctx); err != nil {
+		return fmt.Errorf("eql: configure transaction: %w", err)
 	}
 
-	before, err := inspect(ctx, tx)
+	before, err := inspect(ctx, q)
 	if errors.Is(err, ErrPartial) || err == nil && before.Installed {
 		// The installer starts by dropping both schemas with CASCADE, which
 		// would remove every grant and index that depends on them.
@@ -280,8 +242,8 @@ func Install(ctx context.Context, conn *pgx.Conn, version string, requireORE boo
 		return ErrPgcryptoSchema
 	}
 
-	var canCreate bool
-	if err := tx.QueryRow(ctx, `SELECT has_database_privilege(current_database(), 'CREATE') AND has_schema_privilege('public', 'CREATE')`).Scan(&canCreate); err != nil {
+	canCreate, err := q.CanCreate(ctx)
+	if err != nil {
 		return fmt.Errorf("eql: check privileges: %w", err)
 	}
 
@@ -295,17 +257,17 @@ func Install(ctx context.Context, conn *pgx.Conn, version string, requireORE boo
 		return fmt.Errorf("eql: run installer: %w", err)
 	}
 
-	after, err := inspect(ctx, tx)
+	after, err := inspect(ctx, q)
 	if err != nil {
 		return err
 	}
 
-	var comment *string
-	if err := tx.QueryRow(ctx, `SELECT obj_description('eql_v4'::regnamespace, 'pg_namespace')`).Scan(&comment); err != nil {
+	comment, err := q.SchemaComment(ctx)
+	if err != nil {
 		return fmt.Errorf("eql: read schema comment: %w", err)
 	}
 
-	if !after.Installed || after.Version != version || comment == nil || *comment != version {
+	if !after.Installed || after.Version != version || comment != version {
 		return ErrVersionMismatch
 	}
 

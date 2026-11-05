@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prepares a fresh Amp orb for this repository: installs mise and the Go,
-# Terraform and golangci-lint versions pinned in mise.toml and mise.test.toml,
+# Terraform, sqlc and golangci-lint versions pinned in mise.toml and mise.test.toml,
 # downloads Go modules and compiles the race-enabled tests once so the first
 # `mise run check` reuses the build cache. Safe to rerun on a warm snapshot.
 set -euo pipefail

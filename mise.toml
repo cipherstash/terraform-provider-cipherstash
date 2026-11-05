@@ -1,6 +1,8 @@
 [tools]
 go = "1.27.3"
 terraform = "1.14.6"
+# Generates internal/eql/internal/db from internal/eql/queries.sql.
+"github:sqlc-dev/sqlc" = "1.31.1"
 
 [env]
 GOWORK = "off"
@@ -35,7 +37,7 @@ description = "Run non-mutating local tests, vet and formatting checks"
 depends = ["test", "vet", "fmt-check"]
 
 [tasks.codegen]
-description = "Regenerate docs/ and the generated API clients with go generate"
+description = "Regenerate docs/, the API clients and the EQL queries with go generate"
 run = "go generate ./..."
 
 [tasks.install-local]

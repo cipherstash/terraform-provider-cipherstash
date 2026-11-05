@@ -325,7 +325,7 @@ A lockfile generated from the local mirror describes your local build, not a pub
 | `mise run test:postgres` | Runs the EQL installation tests against the PostgreSQL superuser connection in `CS_TEST_POSTGRES_URL`. Each test creates and drops its own database and roles. It limits the upgrade model to 10 random traces of about 10 actions, after its fixed traces. |
 | `mise run examples:validate` | Installs the provider into the local mirror and runs `terraform validate` on each directory in `examples/`. It downloads the other providers the examples use. |
 | `mise run build` | Builds the local provider binary. |
-| `mise run codegen` | Runs `go generate ./...`: generates reference pages from Go schema descriptions using tfplugindocs 0.25.0, and the API clients under `pkg/stack/internal` using oapi-codegen. Edit those descriptions, not `docs/` directly. CI fails if the committed files differ from the output. |
+| `mise run codegen` | Runs `go generate ./...`: generates reference pages from Go schema descriptions using tfplugindocs 0.25.0, the API clients under `pkg/stack/internal` using oapi-codegen, and the EQL queries in `internal/eql/internal/db` from `internal/eql/queries.sql` using sqlc. Edit those descriptions, not `docs/` directly. CI fails if the committed files differ from the output. |
 | `mise run --env test lint` | Runs optional golangci-lint 2.14.0 from `mise.test.toml`. It is separate from `check`. |
 | `mise run --env docs site` | Builds the documentation site from `docs/` with Zensical, pinned in `mise.docs.toml`, into `site/`. `mise run --env docs site:serve` previews it. The Docs workflow publishes it to the `gh-pages` branch when `docs/` changes on `main`. |
 

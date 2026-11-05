@@ -8,8 +8,8 @@ name: Tests
 # PostgreSQL service container for each supported major version, then
 # validates examples/ against the locally built provider. lint runs `mise run lint` with the
 # golangci-lint version pinned in mise.test.toml. generated runs
-# `mise run codegen` (go generate for docs/ and the API clients) and fails if
-# it changes the tree.
+# `mise run codegen` (go generate for docs/, the API clients and the EQL
+# queries) and fails if it changes the tree.
 
 on:
   pull_request:

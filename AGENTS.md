@@ -12,7 +12,7 @@ Terraform provider for CipherStash plus the public Go packages it uses. It is in
 
 ## Toolchain and commands
 
-`mise.toml` pins Go and Terraform and sets `GOWORK=off`; `mise.test.toml` adds golangci-lint, active only with `--env test`. Run commands through mise (`mise run <task>` or `mise exec -- <command>`) so the pinned tools apply.
+`mise.toml` pins Go, Terraform and sqlc and sets `GOWORK=off`; `mise.test.toml` adds golangci-lint, active only with `--env test`. Run commands through mise (`mise run <task>` or `mise exec -- <command>`) so the pinned tools apply.
 
 | Command | Use |
 | --- | --- |
@@ -21,7 +21,7 @@ Terraform provider for CipherStash plus the public Go packages it uses. It is in
 | `mise exec -- go test ./internal/provider -run '^TestCLI' -count=1` | Only the Terraform CLI tests. Narrow `-run` further while iterating. |
 | `mise run test:postgres` | Tests named `*Postgres*` against the superuser URL in `CS_TEST_POSTGRES_URL`; the CI `postgres` job runs it on PostgreSQL 16 and 17. Each test creates and drops its own database and roles. It passes `-rapid.checks` and `-rapid.steps` to bound the upgrade state machine; running that test without them takes rapid's defaults of 100 traces of about 30 Terraform actions. |
 | `mise run examples:validate` | `terraform validate` on each `examples/` directory using the local mirror; needs network access for other providers. `check` runs `terraform fmt -check` on `examples/`. |
-| `mise run codegen` | Runs `go generate ./...`, which regenerates `docs/` and the API clients. |
+| `mise run codegen` | Runs `go generate ./...`, which regenerates `docs/`, the API clients and the EQL queries. |
 | `mise run --env docs site` | Builds the Zensical site from `docs/` (tools in `mise.docs.toml`); the Docs workflow publishes it to `gh-pages` from `main`. |
 | `mise run build` / `mise run install-local` | Builds the provider, or installs it into a local mirror under `.local/`. |
 
@@ -31,7 +31,7 @@ Lint is stricter than `check`: it formats with gofumpt rather than gofmt, requir
 
 ## Generated files
 
-`mise run codegen` runs every `go:generate` directive. `docs/` comes from the `Description` strings in the schemas through the tfplugindocs directive in `main.go`; change the Go descriptions, run `mise run codegen` and commit the pages with the source change. `pkg/stack/internal/*/client.gen.go` comes from the oapi-codegen directives (see `pkg/stack/AGENTS.md`). After regenerating, `git status` must show only the changes you intended; CI's Generated files job fails on any drift.
+`mise run codegen` runs every `go:generate` directive. `docs/` comes from the `Description` strings in the schemas through the tfplugindocs directive in `main.go`; change the Go descriptions, run `mise run codegen` and commit the pages with the source change. `pkg/stack/internal/*/client.gen.go` comes from the oapi-codegen directives (see `pkg/stack/AGENTS.md`). `internal/eql/internal/db` comes from sqlc: write every SQL statement in `internal/eql/queries.sql`, qualify system catalogs with `pg_catalog` and cast results so sqlc can type them, and declare any other object a query uses in `internal/eql/schema.sql`, which sqlc reads but nothing runs. The vendored installers are the only SQL run outside it. After regenerating, `git status` must show only the changes you intended; CI's Generated files job fails on any drift.
 
 ## Provider conventions
 
