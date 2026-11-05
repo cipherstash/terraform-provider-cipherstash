@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,13 +23,16 @@ func TestBundlesMatchDigests(t *testing.T) {
 
 	embedded := map[string]bool{}
 	for _, dir := range dirs {
-		script, err := bundles.ReadFile(path.Join("bundles", dir.Name(), "eql-v4-install.sql"))
-		require.NoError(t, err)
+		r, ok := releases()[dir.Name()]
+		require.True(t, ok, "bundles/%s has no manifest entry", dir.Name())
 
-		sum := sha256.Sum256(script)
-		digest, ok := SHA256(dir.Name())
-		require.True(t, ok, "bundles/%s has no digest", dir.Name())
-		require.Equal(t, digest, hex.EncodeToString(sum[:]), "bundles/%s does not match its digest", dir.Name())
+		for name, digest := range map[string]string{"eql-v4-install.sql": r.InstallSQLSHA256, "eql-v4-uninstall.sql": r.UninstallSQLSHA256} {
+			script, err := bundles.ReadFile(path.Join("bundles", dir.Name(), name))
+			require.NoError(t, err)
+
+			sum := sha256.Sum256(script)
+			require.Equal(t, digest, hex.EncodeToString(sum[:]), "bundles/%s/%s does not match its digest", dir.Name(), name)
+		}
 
 		embedded[dir.Name()] = true
 	}
@@ -198,6 +203,14 @@ func TestPostgresInstallWithoutSuperuser(t *testing.T) {
 	require.True(t, after.Installed)
 	require.False(t, after.OREAvailable)
 	require.Equal(t, role.User, after.Owner)
+
+	// The role owns everything it installed, and the uninstaller's CASCADE
+	// removes the eql_ore_unavailable constraints from the domains in public.
+	require.NoError(t, Uninstall(t.Context(), conn))
+
+	after, err = Inspect(t.Context(), conn)
+	require.NoError(t, err)
+	require.False(t, after.Installed)
 }
 
 func TestPostgresInstallRefusals(t *testing.T) {
@@ -293,16 +306,21 @@ func TestPostgresInspectPartialInstallation(t *testing.T) {
 	require.ErrorIs(t, err, ErrPartial)
 }
 
-// snapshot lists the database's schemas, extensions and functions.
+// snapshot lists the database's schemas, extensions, and its functions,
+// operators, types and relations outside the system schemas.
 func snapshot(t *testing.T, database *pgx.ConnConfig) []string {
 	t.Helper()
 
 	rows, err := connect(t, database).Query(t.Context(), `
+WITH user_namespace AS (
+  SELECT oid FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+)
 SELECT 'schema ' || nspname FROM pg_namespace
 UNION ALL SELECT 'extension ' || extname FROM pg_extension
-UNION ALL SELECT 'function ' || p.oid::regprocedure::text FROM pg_proc p
-  JOIN pg_namespace n ON n.oid = p.pronamespace
-  WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+UNION ALL SELECT 'function ' || oid::regprocedure::text FROM pg_proc WHERE pronamespace IN (SELECT oid FROM user_namespace)
+UNION ALL SELECT 'operator ' || oid::regoperator::text FROM pg_operator WHERE oprnamespace IN (SELECT oid FROM user_namespace)
+UNION ALL SELECT 'type ' || oid::regtype::text FROM pg_type WHERE typnamespace IN (SELECT oid FROM user_namespace)
+UNION ALL SELECT 'relation ' || oid::regclass::text FROM pg_class WHERE relnamespace IN (SELECT oid FROM user_namespace)
 ORDER BY 1`)
 	require.NoError(t, err)
 
@@ -310,4 +328,222 @@ ORDER BY 1`)
 	require.NoError(t, err)
 
 	return objects
+}
+
+func TestPostgresUninstall(t *testing.T) {
+	for _, installed := range Versions() {
+		t.Run(installed, func(t *testing.T) {
+			database := testDatabase(t)
+			conn := connect(t, database)
+			exec(t, conn, "CREATE EXTENSION pgcrypto SCHEMA public")
+			// The installer always creates schema extensions, which, like
+			// pgcrypto, other code may use.
+			exec(t, conn, "CREATE SCHEMA extensions")
+			clean := snapshot(t, database)
+
+			require.NoError(t, Install(t.Context(), conn, installed, true))
+			require.NoError(t, Uninstall(t.Context(), conn))
+			// Beyond the uninstaller's schemas, this removes the domains and
+			// functions it leaves in public.
+			require.Equal(t, clean, snapshot(t, database), "uninstalling left objects behind or removed others")
+
+			require.NoError(t, Uninstall(t.Context(), conn), "uninstalling without EQL must change nothing")
+			require.Equal(t, clean, snapshot(t, database))
+
+			// The domains are gone, so a new installation creates them with its own rules.
+			require.NoError(t, Install(t.Context(), conn, version, true))
+			after, err := Inspect(t.Context(), conn)
+			require.NoError(t, err)
+			require.Equal(t, version, after.Version)
+		})
+	}
+}
+
+// withSQL is a refusal setup that runs statements as the superuser.
+func withSQL(statements string) func(t *testing.T, database *pgx.ConnConfig) *pgx.Conn {
+	return func(t *testing.T, database *pgx.ConnConfig) *pgx.Conn {
+		t.Helper()
+
+		conn := connect(t, database)
+		exec(t, conn, statements)
+
+		return conn
+	}
+}
+
+func TestPostgresUninstallRefusals(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, database *pgx.ConnConfig) *pgx.Conn
+		want  error
+		named string
+	}{
+		// Columns using the domains in public, which the uninstaller keeps.
+		{
+			name:  "table column",
+			setup: withSQL("CREATE TABLE encrypted (email public.eql_v4_text_eq)"),
+			want:  ErrInUse,
+			named: "column email of table encrypted",
+		},
+		{
+			name:  "array column in a view",
+			setup: withSQL("CREATE VIEW emails AS SELECT ARRAY[NULL::public.eql_v4_text_eq] AS emails"),
+			want:  ErrInUse,
+			named: "column emails of view emails",
+		},
+		{
+			name:  "partitioned table column",
+			setup: withSQL("CREATE TABLE events (email public.eql_v4_text_eq, at date) PARTITION BY RANGE (at)"),
+			want:  ErrInUse,
+			named: "column email of table events",
+		},
+		{
+			name:  "materialized view column",
+			setup: withSQL("CREATE MATERIALIZED VIEW emails AS SELECT NULL::public.eql_v4_text_eq AS email"),
+			want:  ErrInUse,
+			named: "column email of materialized view emails",
+		},
+		{
+			name: "foreign table column",
+			setup: withSQL(`CREATE FOREIGN DATA WRAPPER placeholder;
+CREATE SERVER elsewhere FOREIGN DATA WRAPPER placeholder;
+CREATE FOREIGN TABLE remote (email public.eql_v4_text_eq) SERVER elsewhere`),
+			want:  ErrInUse,
+			named: "column email of foreign table remote",
+		},
+		{
+			name:  "composite type attribute",
+			setup: withSQL("CREATE TYPE contact AS (email public.eql_v4_text_eq)"),
+			want:  ErrInUse,
+			named: "column email of composite type contact",
+		},
+		// Objects outside EQL that the uninstaller's CASCADE would drop.
+		{
+			name: "view on a view calling EQL",
+			setup: withSQL(`CREATE VIEW eql_release AS SELECT eql_v4.version() AS version;
+CREATE VIEW release_copy AS SELECT * FROM eql_release`),
+			want:  ErrDependents,
+			named: "view release_copy",
+		},
+		{
+			name:  "materialized view calling EQL",
+			setup: withSQL("CREATE MATERIALIZED VIEW eql_release AS SELECT eql_v4.version() AS version"),
+			want:  ErrDependents,
+			named: "materialized view eql_release",
+		},
+		{
+			name:  "view using an EQL operator",
+			setup: withSQL("CREATE VIEW same AS SELECT NULL::public.eql_v4_text_eq = NULL::public.eql_v4_text_eq AS same"),
+			want:  ErrDependents,
+			named: "view same",
+		},
+		{
+			name:  "column typed with an EQL schema type",
+			setup: withSQL("CREATE TABLE terms (term eql_v4.query_text_eq)"),
+			want:  ErrDependents,
+			named: "column term of table terms",
+		},
+		{
+			name: "index calling EQL",
+			setup: withSQL(`CREATE TABLE payloads (payload jsonb);
+CREATE INDEX payloads_ord ON payloads (eql_v4.ord_term(payload::public.eql_v4_bigint_ord))`),
+			want:  ErrDependents,
+			named: "index payloads_ord",
+		},
+		{
+			name:  "CHECK constraint calling EQL",
+			setup: withSQL("CREATE TABLE releases (id int CONSTRAINT has_eql CHECK (eql_v4.version() IS NOT NULL))"),
+			want:  ErrDependents,
+			named: "constraint has_eql on table releases",
+		},
+		{
+			name: "policy calling EQL",
+			setup: withSQL(`CREATE TABLE releases (id int);
+CREATE POLICY has_eql ON releases USING (eql_v4.version() IS NOT NULL)`),
+			want:  ErrDependents,
+			named: "policy has_eql on table releases",
+		},
+		{
+			name:  "generated column calling EQL",
+			setup: withSQL("CREATE TABLE releases (id int, version text GENERATED ALWAYS AS (eql_v4.version()) STORED)"),
+			want:  ErrDependents,
+			named: "column version of table releases",
+		},
+		{
+			name:  "SQL function body calling EQL",
+			setup: withSQL("CREATE FUNCTION release() RETURNS text LANGUAGE sql BEGIN ATOMIC SELECT eql_v4.version(); END"),
+			want:  ErrDependents,
+			named: "function release()",
+		},
+		{
+			name: "role that does not own EQL",
+			setup: func(t *testing.T, database *pgx.ConnConfig) *pgx.Conn {
+				role := testRole(t, database)
+				exec(t, connect(t, database), "GRANT USAGE ON SCHEMA eql_v4, eql_v4_internal TO "+role.User)
+
+				return connect(t, role)
+			},
+			want:  ErrNotOwner,
+			named: "schema eql_v4",
+		},
+		{
+			name:  "installed version without an uninstaller",
+			setup: withSQL("CREATE OR REPLACE FUNCTION eql_v4.version() RETURNS text IMMUTABLE STRICT LANGUAGE sql AS $$SELECT 'go-0.0.0'$$"),
+			want:  ErrNoUninstaller,
+		},
+		{
+			name: "lock held by another session",
+			setup: func(t *testing.T, database *pgx.ConnConfig) *pgx.Conn {
+				holder := connect(t, database)
+				exec(t, holder, "SELECT pg_advisory_lock(hashtext('cipherstash.eql.lifecycle'))")
+
+				return connect(t, database)
+			},
+			want: ErrLocked,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := testDatabase(t)
+			require.NoError(t, Install(t.Context(), connect(t, database), version, true))
+			conn := test.setup(t, database)
+			before := snapshot(t, database)
+
+			err := Uninstall(t.Context(), conn)
+			require.ErrorIs(t, err, test.want)
+			require.True(t, Refused(err))
+			if test.named != "" {
+				objects, ok := errors.AsType[*ObjectsError](err)
+				require.True(t, ok, "the refusal names no objects")
+				require.Contains(t, objects.Names, test.named)
+			}
+
+			require.Equal(t, before, snapshot(t, database), "a refused uninstall changed the database")
+		})
+	}
+}
+
+func TestPostgresUninstallFailsOnLeftoverDependents(t *testing.T) {
+	database := testDatabase(t)
+	conn := connect(t, database)
+	require.NoError(t, Install(t.Context(), conn, version, true))
+	// The scan follows dependencies on the EQL schemas only. This function
+	// depends on a domain in public, so dropping the domain without CASCADE
+	// fails and the whole uninstall rolls back.
+	exec(t, conn, "CREATE FUNCTION email_length(email public.eql_v4_text_eq) RETURNS int LANGUAGE sql AS 'SELECT 1'")
+	before := snapshot(t, database)
+
+	err := Uninstall(t.Context(), conn)
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	require.True(t, ok, "%v", err)
+	require.Equal(t, "2BP01", pgErr.Code)
+	require.False(t, Refused(err))
+	require.Equal(t, before, snapshot(t, database), "a failed uninstall changed the database")
+}
+
+func TestPostgresUninstallPartialInstallation(t *testing.T) {
+	database := testDatabase(t)
+	conn := connect(t, database)
+	exec(t, conn, "CREATE SCHEMA eql_v4")
+
+	require.ErrorIs(t, Uninstall(t.Context(), conn), ErrPartial)
 }

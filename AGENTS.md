@@ -5,7 +5,7 @@ Terraform provider for CipherStash plus the public Go packages it uses. It is in
 ## Layout
 
 - `internal/provider`: the provider, its resources and data source, and the offline test suite. `main.go` serves it.
-- `internal/eql`: the EQL v4 installers, compiled in from `bundles/<version>/eql-v4-install.sql` (byte-for-byte release assets, listed with their release tags and SHA-256 digests in `releases.json`, which a test checks). Until cipherstash/stack has a stable Go release, ship only the latest release candidate and the one before it: adding a release removes the oldest bundle and its manifest entry, and the SQL that inspects and installs them.
+- `internal/eql`: the EQL v4 installers and uninstallers, compiled in from `bundles/<version>/eql-v4-install.sql` and `eql-v4-uninstall.sql` (byte-for-byte release assets, listed with their release tags and SHA-256 digests in `releases.json`, which a test checks). Until cipherstash/stack has a stable Go release, ship only the latest release candidate and the one before it: adding a release removes the oldest bundle (both files) and its manifest entry, and the SQL that inspects, installs and uninstalls them.
 - `examples/`: complete Terraform configurations. `templates/guides/` holds the guides tfplugindocs renders into `docs/guides/`; a guide embeds an example with `{{ tffile "examples/<name>/main.tf" }}`.
 - `pkg/stack/auth` and `pkg/stack/manage`: public packages that other projects also import. `pkg/stack` has its own AGENTS.md.
 - `docs/`: generated from the schema descriptions. Never edit it by hand.
@@ -31,7 +31,7 @@ Lint is stricter than `check`: it formats with gofumpt rather than gofmt, requir
 
 ## Generated files
 
-`mise run codegen` runs every `go:generate` directive. `docs/` comes from the `Description` strings in the schemas through the tfplugindocs directive in `main.go`; change the Go descriptions, run `mise run codegen` and commit the pages with the source change. `pkg/stack/internal/*/client.gen.go` comes from the oapi-codegen directives (see `pkg/stack/AGENTS.md`). `internal/eql/internal/db` comes from sqlc: write every SQL statement in `internal/eql/queries.sql`, qualify system catalogs with `pg_catalog` and cast results so sqlc can type them, and declare any other object a query uses in `internal/eql/schema.sql`, which sqlc reads but nothing runs. The vendored installers are the only SQL run outside it. After regenerating, `git status` must show only the changes you intended; CI's Generated files job fails on any drift.
+`mise run codegen` runs every `go:generate` directive. `docs/` comes from the `Description` strings in the schemas through the tfplugindocs directive in `main.go`; change the Go descriptions, run `mise run codegen` and commit the pages with the source change. `pkg/stack/internal/*/client.gen.go` comes from the oapi-codegen directives (see `pkg/stack/AGENTS.md`). `internal/eql/internal/db` comes from sqlc: write every SQL statement in `internal/eql/queries.sql`, qualify system catalogs with `pg_catalog` and cast results so sqlc can type them, and declare any other object a query uses in `internal/eql/schema.sql`, which sqlc reads but nothing runs. The vendored installer and uninstaller scripts are the only SQL run outside it. After regenerating, `git status` must show only the changes you intended; CI's Generated files job fails on any drift.
 
 ## Provider conventions
 

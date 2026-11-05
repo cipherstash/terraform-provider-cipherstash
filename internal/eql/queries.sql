@@ -36,3 +36,115 @@ SELECT (has_database_privilege(current_database(), 'CREATE') AND has_schema_priv
 
 -- name: SchemaComment :one
 SELECT COALESCE(obj_description('eql_v4'::regnamespace, 'pg_namespace'), '')::text;
+
+-- name: ObjectsNotOwned :many
+-- The EQL objects Uninstall drops by name that the role lacks the privileges
+-- of the owner for. Dropping a schema with CASCADE needs ownership of the
+-- schema only, not of what it contains.
+SELECT pg_describe_object(o.classid, o.objid, 0)::text
+FROM (
+  SELECT 'pg_namespace'::regclass AS classid, oid AS objid, nspowner AS owner
+  FROM pg_catalog.pg_namespace WHERE nspname IN ('eql_v4', 'eql_v4_internal')
+  UNION ALL
+  SELECT 'pg_type'::regclass, oid, typowner FROM pg_catalog.pg_type
+  WHERE typnamespace = 'public'::regnamespace AND typtype = 'd' AND typname LIKE 'eql\_v4\_%'
+  UNION ALL
+  SELECT 'pg_proc'::regclass, oid, proowner FROM pg_catalog.pg_proc
+  WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'eql\_v4\_%'
+) o
+WHERE NOT pg_has_role(o.owner, 'USAGE')
+ORDER BY 1;
+
+-- name: ColumnsUsingDomains :many
+-- Columns typed with an EQL domain in public, or an array of one, in tables,
+-- partitioned tables, views, materialized views, foreign tables and composite
+-- types. Without EQL those columns either reject writes or compare whole
+-- ciphertexts.
+SELECT pg_describe_object('pg_class'::regclass, c.oid, a.attnum)::text
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'c') AND a.attnum > 0 AND NOT a.attisdropped
+  AND EXISTS (
+    SELECT FROM pg_catalog.pg_type d
+    WHERE d.oid IN (t.oid, t.typelem) AND d.typnamespace = 'public'::regnamespace
+      AND d.typtype = 'd' AND d.typname LIKE 'eql\_v4\_%')
+ORDER BY 1;
+
+-- name: Dependents :many
+-- The objects outside EQL that dropping both EQL schemas with CASCADE would
+-- drop. It follows pg_depend from the two schemas, and from part of an object,
+-- such as a view's rule, to the whole object, and names whole objects only. It
+-- ignores what the installer itself creates outside the schemas: operators
+-- whose function is in an EQL schema, and the eql_ore_unavailable constraints
+-- it adds to the domains in public without the ORE operator class.
+WITH RECURSIVE eql AS (
+  SELECT oid FROM pg_catalog.pg_namespace WHERE nspname IN ('eql_v4', 'eql_v4_internal')
+), dependents(classid, objid, objsubid) AS (
+  SELECT d.classid, d.objid, d.objsubid FROM pg_catalog.pg_depend d
+  WHERE d.refclassid = 'pg_namespace'::regclass AND d.refobjid IN (SELECT oid FROM eql)
+  UNION
+  SELECT n.* FROM dependents x CROSS JOIN LATERAL (
+    SELECT d.classid, d.objid, d.objsubid FROM pg_catalog.pg_depend d
+    WHERE d.refclassid = x.classid AND d.refobjid = x.objid AND (x.objsubid = 0 OR d.refobjsubid = x.objsubid)
+    UNION ALL
+    SELECT d.refclassid, d.refobjid, d.refobjsubid FROM pg_catalog.pg_depend d
+    WHERE d.classid = x.classid AND d.objid = x.objid AND d.objsubid = x.objsubid AND d.deptype = 'i'
+  ) n
+), located AS (
+  SELECT x.*, CASE x.classid
+      WHEN 'pg_amop'::regclass THEN (
+        SELECT f.opfnamespace FROM pg_catalog.pg_amop a
+        JOIN pg_catalog.pg_opfamily f ON f.oid = a.amopfamily WHERE a.oid = x.objid)
+      WHEN 'pg_amproc'::regclass THEN (
+        SELECT f.opfnamespace FROM pg_catalog.pg_amproc a
+        JOIN pg_catalog.pg_opfamily f ON f.oid = a.amprocfamily WHERE a.oid = x.objid)
+      ELSE (SELECT oid FROM pg_catalog.pg_namespace
+            WHERE nspname = (pg_identify_object(x.classid, x.objid, x.objsubid)).schema)
+    END AS namespace
+  FROM dependents x
+)
+SELECT DISTINCT pg_describe_object(x.classid, x.objid, x.objsubid)::text
+FROM located x
+WHERE NOT EXISTS (SELECT FROM eql WHERE eql.oid = x.namespace)
+  AND x.namespace IS DISTINCT FROM 'pg_toast'::regnamespace
+  AND NOT (x.classid = 'pg_operator'::regclass AND EXISTS (
+    SELECT FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_proc p ON p.oid = o.oprcode
+    WHERE o.oid = x.objid AND p.pronamespace IN (SELECT oid FROM eql)))
+  AND NOT (x.classid = 'pg_constraint'::regclass AND EXISTS (
+    SELECT FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_type t ON t.oid = c.contypid
+    WHERE c.oid = x.objid AND c.conname = 'eql_ore_unavailable'
+      AND t.typnamespace = 'public'::regnamespace AND t.typname LIKE 'eql\_v4\_%'))
+  AND NOT EXISTS (
+    SELECT FROM pg_catalog.pg_depend d
+    JOIN located y ON y.classid = d.refclassid AND y.objid = d.refobjid AND y.objsubid = d.refobjsubid
+    WHERE d.classid = x.classid AND d.objid = x.objid AND d.objsubid = x.objsubid AND d.deptype = 'i')
+ORDER BY 1;
+
+-- name: DropLeftovers :exec
+-- Drops what the uninstaller leaves in public: the column domains, then the
+-- functions two of their CHECKs call. Without CASCADE, anything else that
+-- still depends on one fails the statement instead of being dropped with it.
+DO $$
+DECLARE
+  domains text;
+  functions text;
+BEGIN
+  SELECT string_agg(format('public.%I', typname), ', ') INTO domains FROM pg_catalog.pg_type
+  WHERE typnamespace = 'public'::regnamespace AND typtype = 'd' AND typname LIKE 'eql\_v4\_%';
+  IF domains IS NOT NULL THEN
+    EXECUTE 'DROP DOMAIN ' || domains;
+  END IF;
+
+  SELECT string_agg(oid::regprocedure::text, ', ') INTO functions FROM pg_catalog.pg_proc
+  WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'eql\_v4\_%';
+  IF functions IS NOT NULL THEN
+    EXECUTE 'DROP FUNCTION ' || functions;
+  END IF;
+END
+$$;
+
+-- name: AnyEQLObjectRemains :one
+SELECT (to_regnamespace('eql_v4') IS NOT NULL OR to_regnamespace('eql_v4_internal') IS NOT NULL
+    OR EXISTS (SELECT FROM pg_catalog.pg_type WHERE typnamespace = 'public'::regnamespace AND typname LIKE 'eql\_v4\_%')
+    OR EXISTS (SELECT FROM pg_catalog.pg_proc WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'eql\_v4\_%'))::boolean;
