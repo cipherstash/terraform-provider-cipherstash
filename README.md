@@ -116,7 +116,7 @@ Names identify the owning service: `cts` means CipherStash Token Service, which 
 | [`cipherstash_zerokms_keyset`](docs/resources/zerokms_keyset.md) | A keyset's name, description, and enabled status | Updates the existing keyset. Destroy disables it; it does not delete key material. |
 | [`cipherstash_zerokms_keyset_grant`](docs/resources/zerokms_keyset_grant.md) | One client/keyset grant | Changing either ID replaces the grant. Destroy revokes only that pair. |
 | [`cipherstash_zerokms_client` data source](docs/data-sources/zerokms_client.md) | Read-only client metadata | Does not import, change, or delete the client or its grants. |
-| [`cipherstash_eql_v4`](docs/resources/eql_v4.md) | EQL v4 installed in one PostgreSQL database | Changing `database` replaces it; changing `version` is rejected. Destroy uninstalls EQL unless a column or another object still uses it. |
+| [`cipherstash_eql_v4`](docs/resources/eql_v4.md) | EQL v4 installed in one PostgreSQL database | Changing `database` replaces it; changing `version` to a later release upgrades it in place. Destroy uninstalls EQL unless a column or another object still uses it. |
 
 These names replace the earlier development types `cipherstash_actor`, `cipherstash_client`, `cipherstash_keyset` and `cipherstash_keyset_grant`. The old names are not registered, and there is no automatic cross-type state migration. If existing state uses the old types, retain the previous provider binary and protected state backups until you have planned a migration. Changing HCL type names alone does not migrate state. Import cannot recover creation-only credentials.
 
@@ -186,11 +186,87 @@ resource "postgresql_grant" "app_eql" {
 }
 ```
 
-Refresh reads the installed version, owner, ORE availability and `pgcrypto` schema, and removes the resource only when a successful read shows EQL absent. The provider cannot upgrade EQL yet: the installer drops and re-creates both EQL schemas, removing every grant and every index built on EQL functions, so changing `version` is rejected at plan time. Upgrade by hand instead, as below.
+Refresh reads the installed version, owner, ORE availability and `pgcrypto` schema, and removes the resource only when a successful read shows EQL absent.
+
+#### Upgrade EQL
+
+Change `version` to a later release and apply. Upgrades only move forward, in release order; planning rejects an earlier version.
+
+```hcl
+resource "cipherstash_eql_v4" "app" {
+  database            = "app"
+  version             = "go-0.1.0-rc.3" # was go-0.1.0-rc.2
+  allow_index_rebuild = true
+  depends_on          = [postgresql_extension.pgcrypto]
+}
+```
+
+EQL has no upgrade script: the new release's installer drops both EQL schemas with CASCADE and creates them again. The provider runs it in one transaction, under the same lock and timeouts as Create, and restores what the CASCADE removes:
+
+- the grants on both schemas and on their routines and types, including a `REVOKE … FROM PUBLIC`, and the default privileges in both schemas. Routines and types that are new in the release get what the installing role's restored default privileges grant, as if PostgreSQL had created them afterwards. A routine or type the release removed loses its grants, and the apply warns with its name. The installing role becomes the grantor of every restored grant; keeping the original grantor would mean writing PostgreSQL's catalogs, which needs a superuser;
+- when `allow_index_rebuild` is `true`, every index on a regular table that calls an EQL function, with its comment and `CLUSTER` mark. The provider then runs `ANALYZE` on their tables, and rolls back if any rebuilt index differs from the original, including its operator classes.
+
+So a `postgresql_grant` on the schemas sees no drift. A `postgresql_grant` on every function in a schema finds the routines that are new in the release ungranted, unless default privileges cover them, and grants them on the next apply. The upgrade changes nothing and fails if:
+
+- indexes need rebuilding and `allow_index_rebuild` is `false`;
+- any other object outside EQL depends on it, such as a view, materialized view, constraint, policy, generated column, trigger condition or SQL function that calls an EQL function, a column typed with a type from schema `eql_v4`, or an index on a partitioned table, a materialized view or another session's temporary table, in a non-default tablespace or with a per-column statistics target. Remove them, upgrade, then re-create them;
+- the role lacks the privileges of the owner of the EQL schemas, of the `eql_v4_*` domains and functions in `public`, of the tables whose indexes it rebuilds, or of the roles whose default privileges it restores;
+- the database no longer has the version in state, or another installation holds the lock;
+- any check Create makes fails.
+
+The error names up to 20 of the objects involved.
+
+Plan a maintenance window. The install itself takes seconds, but before running the installer the upgrade locks every table whose indexes it rebuilds against reads and writes, until it commits. Queries lock a table before its indexes and the installer locks them the other way round, so locking the tables first makes the upgrade wait for running queries instead of deadlocking with them. With EQL indexes on more than one table, a transaction that reads several of them can still deadlock with the upgrade; PostgreSQL then rolls one of them back, and if that is the upgrade it changes nothing and can be retried. Waiting more than 5 seconds for a lock, or running one statement for more than 10 minutes, rolls the whole upgrade back. A reinstall holds about 9,300 locks for go-0.1.0-rc.3, so the lock table advice under [Uninstall EQL](#uninstall-eql) applies as well. To keep large tables available, [rebuild the indexes concurrently](#upgrade-eql-without-blocking-tables) instead.
+
+After an upgrade, or an upgrade by hand, reconnect the applications or run `DEALLOCATE ALL` in their sessions. The reinstall re-creates every EQL type under a new identifier, so a prepared statement whose parameter PostgreSQL typed as an EQL domain, such as `$1::eql_v4.query_text_eq`, fails with `cache lookup failed for type` until its connection prepares it again. Connection pools keep those statements, so recycle them too. Casting the parameter through `jsonb`, as in `$1::jsonb::eql_v4.query_text_eq`, avoids this.
+
+The upgrade cannot check two things:
+
+- PL/pgSQL functions and triggers that call EQL. PostgreSQL does not record what their bodies call, so they survive the reinstall and fail when they run if the release removed or changed a function they call.
+- The column domains in `public`. The installer creates them only when they don't exist, so an upgraded database keeps the domain rules of the version it first installed. Check the release notes for changes to them.
+
+#### Upgrade EQL without blocking tables
+
+PostgreSQL can't build an index `CONCURRENTLY` inside a transaction, so the provider rebuilds indexes with a plain `CREATE INDEX`, which blocks their tables until the upgrade commits. To keep the tables readable and writable instead, drop the EQL indexes before the upgrade and re-create them concurrently after it. Queries that used the indexes run as sequential scans until they are back, and the upgrade is no longer all-or-nothing: if a re-create fails, EQL is already upgraded.
+
+1. Save the statements that re-create the indexes, because the next step removes what this query reads:
+
+   ```sh
+   psql -XAt -c "
+   SELECT DISTINCT regexp_replace(pg_get_indexdef(d.objid), '^CREATE (UNIQUE )?INDEX', 'CREATE \1INDEX CONCURRENTLY') || ';'
+   FROM pg_depend d
+   JOIN pg_proc p ON p.oid = d.refobjid
+   WHERE d.classid = 'pg_class'::regclass
+     AND d.refclassid = 'pg_proc'::regclass
+     AND p.pronamespace IN ('eql_v4'::regnamespace, 'eql_v4_internal'::regnamespace)" > create-eql-indexes.sql
+   ```
+
+   The statements don't include index comments or `CLUSTER` marks; note those and re-apply them after step 4.
+
+2. Drop the indexes one at a time, outside a transaction:
+
+   ```sh
+   psql -XAt -c "
+   SELECT DISTINCT 'DROP INDEX CONCURRENTLY ' || d.objid::regclass || ';'
+   FROM pg_depend d
+   JOIN pg_proc p ON p.oid = d.refobjid
+   WHERE d.classid = 'pg_class'::regclass
+     AND d.refclassid = 'pg_proc'::regclass
+     AND p.pronamespace IN ('eql_v4'::regnamespace, 'eql_v4_internal'::regnamespace)" | psql -X -v ON_ERROR_STOP=1
+   ```
+
+3. Change `version` and apply. With no indexes left to rebuild, `allow_index_rebuild` can stay `false`, and the upgrade locks no tables.
+4. Re-create the indexes, again outside a transaction, then `ANALYZE` their tables:
+
+   ```sh
+   psql -X -v ON_ERROR_STOP=1 -f create-eql-indexes.sql
+   ```
+
+   A failed `CREATE INDEX CONCURRENTLY` leaves an `INVALID` index behind. Drop it and run that statement again.
 
 #### Upgrade EQL by hand
 
-Plan a maintenance window: from the reinstall until the grants are restored, roles other than the installing role get `permission denied for schema eql_v4`, and queries cannot use the dropped indexes until they are re-created.
+The provider contains only the latest two releases, so it cannot upgrade from an earlier one. Upgrade those by hand. Plan a maintenance window: from the reinstall until the grants are restored, roles other than the installing role get `permission denied for schema eql_v4`, and queries cannot use the dropped indexes until they are re-created.
 
 1. Record the indexes that the reinstall will drop:
 
@@ -212,8 +288,6 @@ Plan a maintenance window: from the reinstall until the grants are restored, rol
 
 4. Set `version` to the new version, import the installation with `terraform import cipherstash_eql_v4.app app` or an `import` block, and apply. Grant resources such as `postgresql_grant` find the `USAGE` grants missing and grant them again in the same apply.
 5. Run the statements from step 1, then `ANALYZE` the tables they index.
-
-The installer creates the column types in `public` only when they don't exist, so an upgraded database keeps the column types of the version first installed. Check the release notes for changes to them before upgrading.
 
 #### Uninstall EQL
 
@@ -357,7 +431,7 @@ The offline suite has four layers, and a fifth runs against PostgreSQL:
 | Direct native-backed tests (`failures_test.go`, `crud_test.go`, `provider_test.go`) | State retention on failed inventory reads, pagination and metadata ambiguity, partial keyset writes, uncertain grant/revoke outcomes, confirmed destroy, credential precedence, independent authentication lifetimes and cancellation. Native authentication verifies signed fixture tokens against local signing-key and HTTP fixtures; upstream error bodies must not enter diagnostics. |
 | Direct resource tests (`resources_test.go`) | Focused reconciliation tests with injected `manage` client results, including import restrictions, missing objects and partial failures. |
 | Public SDK (`pkg/stack/auth`, `pkg/stack/manage`) | Signed-token validation and refresh, service request contracts, malformed-inventory rejection, zero-grant clients, one-time secret export, cancellation, and no write retries or redirects. These tests use local service fixtures, not live credentials. |
-| PostgreSQL (`internal/eql`, `TestCLIPostgres*` in `cli_test.go`) | Runs only with `CS_TEST_POSTGRES_URL`. Installs EQL as a superuser and as a role without it, checks that every refusal leaves the database unchanged, and runs Terraform against the database: apply, import, refresh after an out-of-band uninstall, uninstall on destroy and replacement and its refusals, and import of an installation made outside Terraform. A rapid state machine (`TestCLIPostgresEQLUpgradeModel`) runs Terraform through every upgrade path between the compiled-in versions: changing `version` is rejected with nothing changed, and an upgrade made by hand is adopted by removing the resource from state, reinstalling and importing. Destroy uninstalls once the table of EQL-typed columns is dropped, so traces install again afterwards, and no EQL domains or functions may remain in `public`. It also checks that no Terraform action changes a table of EQL-typed columns or its functional indexes, that a reinstall drops those indexes, and that re-creating them binds the expected operator classes. The Tests workflow runs it against PostgreSQL 16 and 17. |
+| PostgreSQL (`internal/eql`, `TestCLIPostgres*` in `cli_test.go`) | Runs only with `CS_TEST_POSTGRES_URL`. Installs EQL as a superuser and as a role without it, checks that every refusal leaves the database unchanged, and runs Terraform against the database: apply, import, refresh after an out-of-band uninstall, uninstall on destroy and replacement and its refusals, and import of an installation made outside Terraform. The upgrade tests check that indexes, their comments and `CLUSTER` marks, grants on schemas, routines and types, `REVOKE FROM PUBLIC` and default privileges survive, that routines and types new in a release get the installing role's default privileges, and that each refusal, and a failure while restoring them, leaves the database unchanged. A rapid state machine (`TestCLIPostgresEQLUpgradeModel`) runs Terraform through every upgrade path between the compiled-in versions: changing `version` to a later release upgrades in place, keeping a role's grants and, with `allow_index_rebuild`, the functional indexes; it refuses with nothing changed while indexes need rebuilding or a view depends on EQL; a downgrade fails to plan; and an upgrade made by hand is adopted by removing the resource from state, reinstalling and importing. Destroy uninstalls once the table of EQL-typed columns and the view are dropped, so traces install again afterwards, and no EQL domains or functions may remain in `public`. It also checks that no other Terraform action changes a table of EQL-typed columns or its functional indexes, that a hand reinstall drops those indexes and grants, and that re-creating the indexes binds the expected operator classes. The Tests workflow runs it against PostgreSQL 16 and 17. |
 
 CLI tests use `resource.UnitTest`, so they run without live-acceptance opt-in. They require the pinned Terraform on `PATH` and fail rather than download another version. Run them through mise, which supplies the actual executable rather than a tool shim. Each case uses a temporary CLI configuration and fake credentials. The in-process provider's transport only permits local fixture routing. Tests run serially because they replace the process-default transport and environment. This setup tests separate provider session ownership directly, not Terraform provider aliases or binary installation.
 

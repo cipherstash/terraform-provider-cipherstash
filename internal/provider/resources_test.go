@@ -738,6 +738,7 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 type testEQL struct {
 	inspect   func(database string) (eql.Installation, error)
 	install   func(database, version string, requireORE bool) error
+	upgrade   func(database, from, to string, requireORE, rebuildIndexes bool) (eql.Report, error)
 	uninstall func(database string) error
 }
 
@@ -747,6 +748,10 @@ func (d testEQL) InspectEQL(_ context.Context, database string) (eql.Installatio
 
 func (d testEQL) InstallEQL(_ context.Context, database, version string, requireORE bool) error {
 	return d.install(database, version, requireORE)
+}
+
+func (d testEQL) UpgradeEQL(_ context.Context, database, from, to string, requireORE, rebuildIndexes bool) (eql.Report, error) {
+	return d.upgrade(database, from, to, requireORE, rebuildIndexes)
 }
 
 func (d testEQL) UninstallEQL(_ context.Context, database string) error {
@@ -766,7 +771,7 @@ func savedEQL() eqlModel {
 	digest, _ := eql.SHA256(testEQLVersion)
 
 	return eqlModel{
-		ID: types.StringValue("app"), Database: types.StringValue("app"), Version: types.StringValue(testEQLVersion), RequireORE: types.BoolValue(true),
+		ID: types.StringValue("app"), Database: types.StringValue("app"), Version: types.StringValue(testEQLVersion), RequireORE: types.BoolValue(true), AllowRebuild: types.BoolValue(false),
 		Schema: types.StringValue(eql.Schema), InternalSchema: types.StringValue(eql.InternalSchema), SHA256: types.StringValue(digest),
 		OREAvailable: types.BoolValue(true), Owner: types.StringValue("postgres"), PgcryptoSchema: types.StringValue("public"),
 	}
@@ -923,16 +928,117 @@ func TestEQLDeleteStateOnFailure(t *testing.T) {
 	}
 }
 
-func TestEQLPlanRejectsVersionChange(t *testing.T) {
-	r := &eqlResource{}
-	state := resourceState(t, r, savedEQL())
-	changed := savedEQL()
-	changed.Version = types.StringValue("go-0.0.1")
-	planned := resourceState(t, r, changed)
-	resp := resource.ModifyPlanResponse{Plan: tfsdk.Plan(planned)}
-	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{State: state, Plan: tfsdk.Plan(planned)}, &resp)
-	require.True(t, resp.Diagnostics.HasError())
-	require.Equal(t, "EQL upgrades are not supported", resp.Diagnostics[0].Summary())
+func TestEQLPlanVersionChange(t *testing.T) {
+	from, to := eql.Versions()[0], eql.Versions()[1]
+	for _, tc := range []struct {
+		name, from, to string
+		wantError      string
+	}{
+		{name: "upgrade", from: from, to: to},
+		{name: "downgrade", from: to, to: from, wantError: "EQL downgrades are not supported"},
+		{name: "from a version the provider does not ship", from: "go-0.0.1", to: to, wantError: "Cannot upgrade EQL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// No database: planning reads only state and configuration.
+			r := &eqlResource{}
+			saved := savedEQL()
+			saved.Version = types.StringValue(tc.from)
+			state := resourceState(t, r, saved)
+			changed := saved
+			changed.Version = types.StringValue(tc.to)
+			planned := resourceState(t, r, changed)
+			resp := resource.ModifyPlanResponse{Plan: tfsdk.Plan(planned)}
+			r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{State: state, Plan: tfsdk.Plan(planned)}, &resp)
+			if tc.wantError != "" {
+				require.True(t, resp.Diagnostics.HasError())
+				require.Equal(t, tc.wantError, resp.Diagnostics[0].Summary())
+
+				return
+			}
+
+			require.False(t, resp.Diagnostics.HasError(), "%v", resp.Diagnostics)
+			require.Equal(t, "EQL upgrade reinstalls EQL", resp.Diagnostics[0].Summary())
+			var plan eqlModel
+			noErrors(t, resp.Plan.Get(context.Background(), &plan))
+			// The reinstall can change these, so the plan must not promise them.
+			require.True(t, plan.Owner.IsUnknown())
+			require.True(t, plan.OREAvailable.IsUnknown())
+			require.True(t, plan.PgcryptoSchema.IsUnknown())
+			digest, _ := eql.SHA256(to)
+			require.Equal(t, digest, plan.SHA256.ValueString())
+		})
+	}
+}
+
+func TestEQLUpdateStateOnFailure(t *testing.T) {
+	from, to := eql.Versions()[0], eql.Versions()[1]
+	commitUnknown := fmt.Errorf("%w: %w", eql.ErrCommitUnknown, upstreamDatabaseErr)
+	dependents := &eql.ObjectsError{Err: eql.ErrDependents, Names: []string{"view release_copy"}, Total: 1}
+	for _, tc := range []struct {
+		name                   string
+		upgradeErr, readErr    error
+		readVersion            string
+		absent                 bool
+		wantError, wantWarning bool
+		wantVersion            string
+		wantDetail             string
+	}{
+		{name: "upgraded", readVersion: to, wantWarning: true, wantVersion: to, wantDetail: "encrypted_email_eq"},
+		{name: "refused", upgradeErr: dependents, wantError: true, wantVersion: from, wantDetail: "view release_copy"},
+		{name: "rolled back", upgradeErr: upstreamDatabaseErr, wantError: true, wantVersion: from, wantDetail: "rolled back"},
+		{name: "commit unknown and upgraded", upgradeErr: commitUnknown, readVersion: to, wantWarning: true, wantVersion: to, wantDetail: "confirms EQL " + to},
+		{name: "commit unknown and not upgraded", upgradeErr: commitUnknown, readVersion: from, wantError: true, wantVersion: from, wantDetail: "did not commit"},
+		{name: "commit unknown and read failed", upgradeErr: commitUnknown, readErr: upstreamDatabaseErr, wantError: true, wantVersion: from, wantDetail: "inspect the database"},
+		{name: "read failed after commit", readErr: upstreamDatabaseErr, wantError: true, wantVersion: to, wantDetail: "committed"},
+		{name: "not visible after commit", absent: true, wantError: true, wantVersion: from, wantDetail: "no EQL installation"},
+		{name: "unexpected version after commit", readVersion: "go-0.0.1", wantError: true, wantVersion: "go-0.0.1", wantDetail: "reports EQL go-0.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &eqlResource{database: testEQL{
+				upgrade: func(database, gotFrom, gotTo string, requireORE, rebuildIndexes bool) (eql.Report, error) {
+					require.Equal(t, "app", database)
+					require.Equal(t, from, gotFrom)
+					require.Equal(t, to, gotTo)
+					require.True(t, requireORE)
+					require.True(t, rebuildIndexes)
+
+					return eql.Report{RebuiltIndexes: []string{"encrypted_email_eq"}}, tc.upgradeErr
+				},
+				inspect: func(string) (eql.Installation, error) {
+					if tc.readErr != nil || tc.absent {
+						return eql.Installation{}, tc.readErr
+					}
+
+					installation := installedEQL()
+					installation.Version = tc.readVersion
+
+					return installation, nil
+				},
+			}}
+			saved := savedEQL()
+			saved.Version = types.StringValue(from)
+			state := resourceState(t, r, saved)
+			changed := saved
+			changed.Version, changed.AllowRebuild = types.StringValue(to), types.BoolValue(true)
+			changed.OREAvailable, changed.Owner, changed.PgcryptoSchema = types.BoolUnknown(), types.StringUnknown(), types.StringUnknown()
+			plan := resourceState(t, r, changed)
+			// As the framework does, the response state starts as the prior state.
+			resp := resource.UpdateResponse{State: state}
+			r.Update(context.Background(), resource.UpdateRequest{State: state, Plan: tfsdk.Plan(plan)}, &resp)
+			require.Equal(t, tc.wantError, resp.Diagnostics.HasError(), "%v", resp.Diagnostics)
+			require.Equal(t, tc.wantWarning, resp.Diagnostics.WarningsCount() > 0, "%v", resp.Diagnostics)
+			require.Contains(t, fmt.Sprint(resp.Diagnostics), tc.wantDetail)
+			require.NotContains(t, fmt.Sprint(resp.Diagnostics), "fixture-upstream-secret")
+			var after eqlModel
+			noErrors(t, resp.State.Get(context.Background(), &after))
+			require.Equal(t, tc.wantVersion, after.Version.ValueString())
+			if tc.wantVersion == from {
+				require.True(t, resp.State.Raw.Equal(state.Raw), "a failed upgrade changed state")
+			}
+
+			require.False(t, after.Owner.IsUnknown() || after.OREAvailable.IsUnknown() || after.PgcryptoSchema.IsUnknown(), "state has unknown values")
+		})
+	}
 }
 
 func TestEQLPlanRefusesUninstallWithoutUninstaller(t *testing.T) {
@@ -963,8 +1069,7 @@ func TestEQLPlanRefusesUninstallWithoutUninstaller(t *testing.T) {
 			resp := resource.ModifyPlanResponse{Plan: planned}
 			r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{State: state, Plan: planned}, &resp)
 			if !tc.wantError {
-				// A compiled-in version passes; a replacement still reports
-				// the version change it asks for.
+				// A compiled-in version passes.
 				require.False(t, slices.ContainsFunc(resp.Diagnostics, func(d diag.Diagnostic) bool { return d.Summary() == "EQL uninstall refused" }), "%v", resp.Diagnostics)
 
 				return

@@ -5,7 +5,8 @@
 // eql-v4-uninstall.sql assets attached to cipherstash/stack Go releases, checked
 // in byte for byte under bundles/<version>/ and listed in releases.json. Each
 // installer drops and re-creates the eql_v4 and eql_v4_internal schemas, so
-// Install only ever runs against a database without EQL v4.
+// Install only ever runs against a database without EQL v4, and Upgrade
+// captures and restores what depends on them.
 //
 // Every other statement is in queries.sql, from which sqlc generates internal/db.
 package eql
@@ -56,29 +57,37 @@ type release struct {
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// releases maps each version in releases.json to its entry. It panics on a
-// malformed manifest, which TestBundlesMatchDigests catches.
-var releases = sync.OnceValue(func() map[string]release {
+// releases lists the entries in releases.json, oldest release first. It panics
+// on a malformed manifest, which TestBundlesMatchDigests catches.
+var releases = sync.OnceValue(func() []release {
 	var entries []release
 	if err := json.Unmarshal(manifest, &entries); err != nil {
 		panic(fmt.Sprintf("eql: releases.json: %v", err))
 	}
 
-	byVersion := make(map[string]release, len(entries))
-	for _, r := range entries {
-		if _, duplicate := byVersion[r.EQLVersion]; duplicate || r.EQLVersion == "" || r.ReleaseTag == "" ||
+	for i, r := range entries {
+		if slices.ContainsFunc(entries[:i], func(earlier release) bool { return earlier.EQLVersion == r.EQLVersion }) ||
+			r.EQLVersion == "" || r.ReleaseTag == "" ||
 			!sha256Hex.MatchString(r.InstallSQLSHA256) || !sha256Hex.MatchString(r.UninstallSQLSHA256) {
 			panic(fmt.Sprintf("eql: releases.json: invalid or duplicate entry for %q", r.EQLVersion))
 		}
-
-		byVersion[r.EQLVersion] = r
 	}
 
-	return byVersion
+	return entries
 })
 
-// Install and Uninstall refuse with one of these errors after rolling back, so
-// the database is unchanged.
+// lookup returns the manifest entry for version and its position, or -1.
+func lookup(version string) (release, int) {
+	i := slices.IndexFunc(releases(), func(r release) bool { return r.EQLVersion == version })
+	if i < 0 {
+		return release{}, -1
+	}
+
+	return releases()[i], i
+}
+
+// Install, Upgrade and Uninstall refuse with one of these errors after rolling
+// back, so the database is unchanged.
 var (
 	ErrUnknownVersion   = errors.New("eql: no installer is compiled in for this version")
 	ErrAlreadyInstalled = errors.New("eql: the database already has an eql_v4 or eql_v4_internal schema")
@@ -88,13 +97,28 @@ var (
 	ErrOREUnavailable   = errors.New("eql: the installer could not create the ORE operator class")
 	ErrVersionMismatch  = errors.New("eql: the installed version does not match the installer")
 
+	// ErrDowngrade means the target version is not later than the installed one.
+	ErrDowngrade = errors.New("eql: the target version is not later than the installed version")
+	// ErrNotInstalledVersion means the database does not have the version an
+	// upgrade starts from.
+	ErrNotInstalledVersion = errors.New("eql: the database does not have the version to upgrade from")
+	// ErrIndexesNeedRebuild comes wrapped in an *ObjectsError naming indexes
+	// that the installer would drop and that rebuilding was not allowed for.
+	ErrIndexesNeedRebuild = errors.New("eql: the installer would drop indexes")
+	// ErrIndexMismatch comes wrapped in an *ObjectsError naming indexes that
+	// did not come back the same after the installer ran.
+	ErrIndexMismatch = errors.New("eql: rebuilt indexes differ from the originals")
+
 	ErrNoUninstaller = errors.New("eql: no uninstaller is compiled in for the installed version")
 	// ErrNotOwner, ErrInUse and ErrDependents come wrapped in an *ObjectsError
-	// that names the objects involved.
+	// that names the objects involved. For ErrNotOwner they are the objects the
+	// operation changes, or the tables and default privileges an upgrade
+	// restores.
 	ErrNotOwner = errors.New("eql: the role does not own every EQL object")
 	ErrInUse    = errors.New("eql: columns use EQL domains")
-	// ErrDependents means objects outside EQL depend on it; the uninstaller's
-	// CASCADE would drop them.
+	// ErrDependents means objects outside EQL depend on it; dropping the EQL
+	// schemas with CASCADE, as the installer and the uninstaller do, would
+	// drop them.
 	ErrDependents = errors.New("eql: objects outside EQL depend on it")
 	// ErrUninstallIncomplete means EQL objects remained after the uninstaller ran.
 	ErrUninstallIncomplete = errors.New("eql: EQL objects remain after uninstalling")
@@ -126,10 +150,12 @@ var (
 	ErrCommitUnknown = errors.New("eql: the outcome of COMMIT is unknown")
 )
 
-// Refused reports whether err is a check that made Install or Uninstall roll back.
+// Refused reports whether err is a check that made Install, Upgrade or
+// Uninstall roll back.
 func Refused(err error) bool {
 	for _, refusal := range []error{
 		ErrUnknownVersion, ErrAlreadyInstalled, ErrLocked, ErrPgcryptoSchema, ErrPrivilege, ErrOREUnavailable, ErrVersionMismatch,
+		ErrDowngrade, ErrNotInstalledVersion, ErrIndexesNeedRebuild, ErrIndexMismatch,
 		ErrNoUninstaller, ErrNotOwner, ErrInUse, ErrDependents, ErrUninstallIncomplete,
 	} {
 		if errors.Is(err, refusal) {
@@ -140,23 +166,32 @@ func Refused(err error) bool {
 	return false
 }
 
-// Versions returns the versions of the compiled-in installers, sorted.
+// Versions returns the versions of the compiled-in installers, oldest release
+// first.
 func Versions() []string {
 	versions := make([]string, 0, len(releases()))
-	for version := range releases() {
-		versions = append(versions, version)
+	for _, r := range releases() {
+		versions = append(versions, r.EQLVersion)
 	}
-
-	slices.Sort(versions)
 
 	return versions
 }
 
+// Later reports whether to is a compiled-in version released after from, which
+// must be compiled in too. Releases are ordered by releases.json, not by name,
+// which would put rc.10 before rc.2.
+func Later(from, to string) bool {
+	_, i := lookup(from)
+	_, j := lookup(to)
+
+	return i >= 0 && j > i
+}
+
 // SHA256 returns the SHA-256 of the compiled-in installer for version.
 func SHA256(version string) (string, bool) {
-	r, ok := releases()[version]
+	r, i := lookup(version)
 
-	return r.InstallSQLSHA256, ok
+	return r.InstallSQLSHA256, i >= 0
 }
 
 // bundle reads a compiled-in script and checks it against its digest.
@@ -176,14 +211,14 @@ func bundle(version, name, digest string) (string, error) {
 
 // Uninstallable reports whether an uninstaller is compiled in for version.
 func Uninstallable(version string) bool {
-	_, ok := releases()[version]
+	_, i := lookup(version)
 
-	return ok
+	return i >= 0
 }
 
 func installer(version string) (string, error) {
-	r, ok := releases()[version]
-	if !ok {
+	r, i := lookup(version)
+	if i < 0 {
 		return "", ErrUnknownVersion
 	}
 
@@ -191,8 +226,8 @@ func installer(version string) (string, error) {
 }
 
 func uninstaller(version string) (string, error) {
-	r, ok := releases()[version]
-	if !ok {
+	r, i := lookup(version)
+	if i < 0 {
 		return "", ErrNoUninstaller
 	}
 
@@ -311,6 +346,20 @@ func Install(ctx context.Context, conn *pgx.Conn, version string, requireORE boo
 		return err
 	}
 
+	if err := runInstaller(ctx, tx, q, before, script, version, requireORE); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrCommitUnknown, err)
+	}
+
+	return nil
+}
+
+// runInstaller checks that the installer can run, runs it, and checks that it
+// installed version, with the ORE operator class when requireORE is set.
+func runInstaller(ctx context.Context, tx pgx.Tx, q *db.Queries, before Installation, script, version string, requireORE bool) error {
 	// The installer creates pgcrypto in schema extensions when it is absent,
 	// accepts public, and fails anywhere else.
 	if before.PgcryptoSchema != "" && before.PgcryptoSchema != "public" && before.PgcryptoSchema != "extensions" {
@@ -352,11 +401,242 @@ func Install(ctx context.Context, conn *pgx.Conn, version string, requireORE boo
 		return ErrOREUnavailable
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("%w: %w", ErrCommitUnknown, err)
+	return nil
+}
+
+// Report lists what an upgrade did that the caller should tell the user about.
+type Report struct {
+	// RebuiltIndexes names the indexes the upgrade dropped and re-created.
+	RebuiltIndexes []string
+	// RemovedObjects names the routines and types that had grants but that the
+	// new release no longer has, so their grants were not restored, each as
+	// "routine <signature>" or "type <name>".
+	RemovedObjects []string
+}
+
+// Upgrade reinstalls EQL v4 at version to over version from in one transaction,
+// restoring what the installer drops: the grants on both EQL schemas and their
+// routines and types, the default privileges in them, and, when rebuildIndexes
+// is set, the indexes that call EQL functions, with their comments and CLUSTER
+// marks. Routines and types that are new in the release get what the restored
+// default privileges grant, as if they had been created after them. Restored
+// grants record the connected role as grantor. It commits only if each rebuilt
+// index matches the original, the installed version matches and, when
+// requireORE is set, the ORE operator class exists.
+//
+// It refuses, changing nothing, when to is not later than from, the database
+// does not have from, another installation holds the lifecycle lock, the role
+// lacks the privileges of the owner of an object the upgrade changes, any
+// object outside EQL other than an index on a regular table depends on it, or
+// such indexes exist and rebuildIndexes is not set. It also refuses in the
+// cases Install does once EQL is absent. Those errors satisfy Refused. A
+// partial installation returns ErrPartial. Every error except ErrCommitUnknown
+// means the transaction rolled back; after ErrCommitUnknown, confirm the
+// outcome with Inspect.
+func Upgrade(ctx context.Context, conn *pgx.Conn, from, to string, requireORE, rebuildIndexes bool) (Report, error) {
+	script, err := installer(to)
+	if err != nil {
+		return Report{}, err
 	}
 
-	return nil
+	if !Later(from, to) {
+		return Report{}, ErrDowngrade
+	}
+
+	tx, q, err := begin(ctx, conn)
+	if err != nil {
+		return Report{}, err
+	}
+
+	// Rollback after Commit is a no-op; its error carries no information.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	before, err := inspect(ctx, q)
+	if err != nil {
+		return Report{}, err
+	}
+
+	if !before.Installed || before.Version != from {
+		return Report{}, ErrNotInstalledVersion
+	}
+
+	dependents, err := q.Dependents(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: list objects: %w", err)
+	}
+
+	var refused, indexes []string
+	for _, d := range dependents {
+		if d.RebuildableIndex == "" {
+			refused = append(refused, d.Name)
+		} else {
+			indexes = append(indexes, d.RebuildableIndex)
+		}
+	}
+
+	notOwned, err := q.ObjectsNotOwned(ctx)
+	if err == nil {
+		var more []string
+		more, err = q.NotOwnedForUpgrade(ctx, indexes)
+		notOwned = append(notOwned, more...)
+	}
+
+	if err := objects(notOwned, err, ErrNotOwner); err != nil {
+		return Report{}, err
+	}
+
+	if err := objects(refused, nil, ErrDependents); err != nil {
+		return Report{}, err
+	}
+
+	if !rebuildIndexes {
+		if err := objects(indexes, nil, ErrIndexesNeedRebuild); err != nil {
+			return Report{}, err
+		}
+	}
+
+	report, err := reinstall(ctx, tx, q, before, script, to, requireORE, indexes)
+	if err != nil {
+		return Report{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Report{}, fmt.Errorf("%w: %w", ErrCommitUnknown, err)
+	}
+
+	return report, nil
+}
+
+// reinstall captures the grants, default privileges and indexes that running
+// the installer drops, runs it, and restores them.
+func reinstall(ctx context.Context, tx pgx.Tx, q *db.Queries, before Installation, script, version string, requireORE bool, indexes []string) (Report, error) {
+	schemaGrants, err := q.SchemaGrants(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: read schema grants: %w", err)
+	}
+
+	objectGrants, err := q.ObjectGrants(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: read routine and type grants: %w", err)
+	}
+
+	defaultPrivileges, err := q.DefaultPrivileges(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: read default privileges: %w", err)
+	}
+
+	existing, err := q.EQLObjects(ctx)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: list routines and types: %w", err)
+	}
+
+	captured, err := q.Indexes(ctx, indexes)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: read indexes: %w", err)
+	}
+
+	lock, err := q.LockTables(ctx, indexes)
+	if err == nil && lock != "" {
+		_, err = tx.Exec(ctx, lock)
+	}
+
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: lock tables: %w", err)
+	}
+
+	if err := runInstaller(ctx, tx, q, before, script, version, requireORE); err != nil {
+		return Report{}, err
+	}
+
+	var granted db.MissingObjectsParams
+	for _, g := range objectGrants {
+		if g.Kind == "routine" {
+			granted.Routines = append(granted.Routines, g.Name)
+		} else {
+			granted.Types = append(granted.Types, g.Name)
+		}
+	}
+
+	removed, err := q.MissingObjects(ctx, granted)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: look up routines and types: %w", err)
+	}
+
+	// The statements come from the queries in queries.sql, which quote every
+	// identifier.
+	restore := func(statements []string) error {
+		for _, statement := range statements {
+			if statement == "" {
+				continue
+			}
+
+			if _, err := tx.Exec(ctx, statement); err != nil {
+				return fmt.Errorf("eql: restore: %w", err)
+			}
+		}
+
+		return nil
+	}
+
+	statements := slices.Concat(schemaGrants, defaultPrivileges)
+	for _, g := range objectGrants {
+		if !slices.Contains(removed, g.Kind+" "+g.Name) {
+			statements = append(statements, g.Statement)
+		}
+	}
+
+	if err := restore(statements); err != nil {
+		return Report{}, err
+	}
+
+	// Routines and types that are new in the release were created before the
+	// default privileges were restored, so apply those now, as PostgreSQL
+	// would have when it created them.
+	var old db.NewObjectGrantsParams
+	for _, o := range existing {
+		if o.Kind == "routine" {
+			old.Routines = append(old.Routines, o.Name)
+		} else {
+			old.Types = append(old.Types, o.Name)
+		}
+	}
+
+	defaults, err := q.NewObjectGrants(ctx, old)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: read default privileges for new objects: %w", err)
+	}
+
+	statements = defaults
+	var analyze []string
+	for _, index := range captured {
+		statements = append(statements, index.Definition, index.Comment, index.Cluster)
+		analyze = append(analyze, index.AnalyzeTable)
+	}
+
+	slices.Sort(analyze)
+	// Expression indexes keep their own statistics, which went with the
+	// dropped indexes.
+	if err := restore(append(statements, slices.Compact(analyze)...)); err != nil {
+		return Report{}, err
+	}
+
+	rebuilt, err := q.Indexes(ctx, indexes)
+	if err != nil {
+		return Report{}, fmt.Errorf("eql: read rebuilt indexes: %w", err)
+	}
+
+	var differ []string
+	for _, index := range captured {
+		if !slices.Contains(rebuilt, index) {
+			differ = append(differ, index.Name)
+		}
+	}
+
+	if err := objects(differ, nil, ErrIndexMismatch); err != nil {
+		return Report{}, err
+	}
+
+	return Report{RebuiltIndexes: indexes, RemovedObjects: removed}, nil
 }
 
 // objects returns an *ObjectsError wrapping refusal when a query named any
@@ -417,7 +697,15 @@ func Uninstall(ctx context.Context, conn *pgx.Conn) error {
 	}{
 		{q.ObjectsNotOwned, ErrNotOwner},
 		{q.ColumnsUsingDomains, ErrInUse},
-		{q.Dependents, ErrDependents},
+		{func(ctx context.Context) ([]string, error) {
+			dependents, err := q.Dependents(ctx)
+			names := make([]string, len(dependents))
+			for i, d := range dependents {
+				names[i] = d.Name
+			}
+
+			return names, err
+		}, ErrDependents},
 	} {
 		names, err := check.list(ctx)
 		if err := objects(names, err, check.refusal); err != nil {

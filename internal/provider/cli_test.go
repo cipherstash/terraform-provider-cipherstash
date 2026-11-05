@@ -1074,10 +1074,13 @@ func TestCLIPostgresEQLImport(t *testing.T) {
 }
 
 // TestCLIPostgresEQLUpgradeModel runs Terraform against a model of one
-// database's EQL installation while its version changes. The provider refuses
-// to change an installed version, so the supported upgrade is: stop managing
-// the installation, reinstall by hand, then import it. Destroy uninstalls once
-// the table of EQL-typed columns is gone, so a trace can install again.
+// database's EQL installation while its version changes. Changing version to
+// a later release upgrades in place, keeping grants and, when
+// allow_index_rebuild is set, the table's functional indexes; it refuses while
+// a view depends on EQL, and an earlier version fails to plan. The hand upgrade
+// still works: stop managing the installation, reinstall, rebuild the indexes
+// and import it. Destroy uninstalls once the table of EQL-typed columns and the
+// view are gone, so a trace can install again.
 func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 	admin := postgresAdmin(t)
 	cliTestCase(t, newServiceFixture(t)) // Pinned CLI and isolated CLI configuration.
@@ -1085,10 +1088,12 @@ func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 	versions := eql.Versions()
 	require.GreaterOrEqual(t, len(versions), 2, "no upgrade path to test")
 
-	// Fixed traces cover every upgrade path whatever the random budget: each
-	// installs its first version through Terraform, then for every later
-	// version tries the change in Terraform before upgrading by hand. Each
-	// ends by uninstalling and installing its first version again.
+	// Fixed traces cover every upgrade path whatever the random budget. Each
+	// installs its first version through Terraform and grants a role access,
+	// then for every later version is refused for its indexes and for a
+	// dependent view before it upgrades, and fails to plan a downgrade. Each
+	// ends by uninstalling, installing its first version again and upgrading
+	// to its last by hand.
 	var paths [][]string
 	for i := range versions {
 		for _, next := range versions[i+1:] {
@@ -1105,36 +1110,38 @@ func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 			m := newEQLUpgradeModel(t, admin, reattach, path[0])
 			defer m.close(t)
 
-			m.apply(t, path[0])
-			m.check(t)
-			for _, next := range path[1:] {
-				for _, step := range []func(){
+			steps := []func(){func() { m.apply(t, path[0]) }, func() { m.grant(t) }}
+			for i, next := range path[1:] {
+				steps = append(steps,
 					func() { m.apply(t, next) },
-					func() { m.forget(t) },
-					func() { m.handInstall(t, next) },
-					func() { m.importExisting(t) },
-					func() { m.rebuildIndexes(t) },
+					func() { m.addView(t) },
+					func() { m.toggleRebuild(t) },
+					func() { m.dropView(t) },
 					func() { m.apply(t, next) },
-				} {
-					step()
-					m.check(t)
-				}
+					func() { m.apply(t, path[i]) },
+				)
 			}
 
-			require.Equal(t, path[len(path)-1], m.state)
-			for _, step := range []func(){
+			last := path[len(path)-1]
+			steps = append(steps,
 				func() { m.destroy(t) },
 				func() { m.dropTable(t) },
 				func() { m.destroy(t) },
 				func() { m.apply(t, path[0]) },
-			} {
+				func() { m.forget(t) },
+				func() { m.handInstall(t, last) },
+				func() { m.importExisting(t) },
+				func() { m.rebuildIndexes(t) },
+				func() { m.apply(t, last) },
+			)
+			for _, step := range steps {
 				step()
 				m.check(t)
 			}
 
 			require.True(t, m.managed)
 			require.True(t, m.indexed)
-			require.Equal(t, path[0], m.state)
+			require.Equal(t, last, m.state)
 		})
 	}
 
@@ -1144,14 +1151,27 @@ func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 			m := newEQLUpgradeModel(r, admin, reattach, version.Draw(r, "configured version"))
 			defer m.close(r)
 
+			whenInstalled := func(action func(rapid.TB)) func(*rapid.T) {
+				return func(r *rapid.T) {
+					if m.installed == "" {
+						r.Skip("EQL is not installed") // Before any draw, so rapid draws another action.
+					}
+
+					action(r)
+				}
+			}
 			r.Repeat(map[string]func(*rapid.T){
-				"apply":        func(r *rapid.T) { m.apply(r, version.Draw(r, "version")) },
-				"hand install": func(r *rapid.T) { m.handInstall(r, version.Draw(r, "version")) },
-				"refresh":      func(r *rapid.T) { m.refresh(r) },
-				"import":       func(r *rapid.T) { m.importExisting(r) },
-				"forget":       func(r *rapid.T) { m.forget(r) },
-				"destroy":      func(r *rapid.T) { m.destroy(r) },
-				"drop table":   func(r *rapid.T) { m.dropTable(r) },
+				"apply":          func(r *rapid.T) { m.apply(r, version.Draw(r, "version")) },
+				"toggle rebuild": func(r *rapid.T) { m.toggleRebuild(r) },
+				"hand install":   func(r *rapid.T) { m.handInstall(r, version.Draw(r, "version")) },
+				"refresh":        func(r *rapid.T) { m.refresh(r) },
+				"import":         func(r *rapid.T) { m.importExisting(r) },
+				"forget":         func(r *rapid.T) { m.forget(r) },
+				"destroy":        func(r *rapid.T) { m.destroy(r) },
+				"drop table":     func(r *rapid.T) { m.dropTable(r) },
+				"grant":          whenInstalled(m.grant),
+				"add view":       whenInstalled(m.addView),
+				"drop view":      func(r *rapid.T) { m.dropView(r) },
 				"rebuild indexes": func(r *rapid.T) {
 					if m.installed == "" || m.indexed || !m.table {
 						r.Skip("no dropped indexes") // Before any draw, so rapid draws another action.
@@ -1176,13 +1196,18 @@ type eqlUpgradeModel struct {
 	drop     func()
 	dir      string
 	provider string
+	role     string // a role that grants give access to EQL
 
-	installed string // eql_v4.version(), or empty before any installation
-	managed   bool   // whether Terraform state holds the installation
-	state     string // the version in Terraform state while managed
-	config    string // the version in the resource block
-	table     bool   // whether the EQL-typed table exists
-	indexed   bool   // whether its EQL functional indexes exist
+	installed    string // eql_v4.version(), or empty before any installation
+	managed      bool   // whether Terraform state holds the installation
+	state        string // the version in Terraform state while managed
+	config       string // the version in the resource block
+	rebuild      bool   // allow_index_rebuild in the resource block
+	stateRebuild bool   // allow_index_rebuild in Terraform state while managed
+	table        bool   // whether the EQL-typed table exists
+	indexed      bool   // whether its EQL functional indexes exist
+	granted      bool   // whether role has USAGE on both EQL schemas and default privileges in one
+	view         bool   // whether a view that calls EQL exists
 }
 
 const eqlAddress = "cipherstash_eql_v4.this"
@@ -1196,9 +1221,21 @@ func newEQLUpgradeModel(t rapid.TB, admin *pgx.ConnConfig, reattach *tfexec.Reat
 	require.NoError(t, err)
 	tf, err := tfexec.NewTerraform(dir, binary)
 	require.NoError(t, err)
-	db, drop := createDatabase(t, admin)
+	db, dropDatabase := createDatabase(t, admin)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	m := &eqlUpgradeModel{ctx: ctx, cancel: cancel, tf: tf, reattach: reattach, db: db, drop: drop, dir: dir, provider: postgresProvider(admin), config: config}
+	role := db.Config().Database + "_app"
+	_, err = db.Exec(ctx, "CREATE ROLE "+role)
+	require.NoError(t, err)
+	drop := func() {
+		dropDatabase()
+		conn, err := pgx.ConnectConfig(context.Background(), admin)
+		require.NoError(t, err)
+		defer func() { _ = conn.Close(context.Background()) }()
+
+		_, err = conn.Exec(context.Background(), "DROP ROLE "+role)
+		require.NoError(t, err)
+	}
+	m := &eqlUpgradeModel{ctx: ctx, cancel: cancel, tf: tf, reattach: reattach, db: db, drop: drop, dir: dir, provider: postgresProvider(admin), role: role, config: config}
 	m.write(t, "")
 	require.NoError(t, tf.Init(ctx, reattach))
 
@@ -1218,7 +1255,7 @@ func (m *eqlUpgradeModel) write(t rapid.TB, block string) {
 
 func (m *eqlUpgradeModel) writeResource(t rapid.TB) {
 	t.Helper()
-	m.write(t, fmt.Sprintf("resource \"cipherstash_eql_v4\" \"this\" {\n database = %q\n version = %q\n}\n", m.db.Config().Database, m.config))
+	m.write(t, fmt.Sprintf("resource \"cipherstash_eql_v4\" \"this\" {\n database = %q\n version = %q\n allow_index_rebuild = %t\n}\n", m.db.Config().Database, m.config, m.rebuild))
 }
 
 // apply configures version and applies. Planning refreshes first, so a
@@ -1228,9 +1265,10 @@ func (m *eqlUpgradeModel) apply(t rapid.TB, version string) {
 	t.Helper()
 	m.config = version
 	m.writeResource(t)
+	upgrade := m.managed && version != m.installed
 	_, err := m.tf.Plan(m.ctx, m.reattach, tfexec.Out("next.tfplan"))
-	if m.managed && version != m.installed {
-		require.ErrorContains(t, err, "EQL upgrades are not supported")
+	if upgrade && !eql.Later(m.installed, version) {
+		require.ErrorContains(t, err, "EQL downgrades are not supported")
 
 		return // A failed plan saves nothing, including the refresh.
 	}
@@ -1238,17 +1276,55 @@ func (m *eqlUpgradeModel) apply(t rapid.TB, version string) {
 	require.NoError(t, err)
 	err = m.tf.Apply(m.ctx, m.reattach, tfexec.DirOrPlan("next.tfplan"))
 	switch {
+	case upgrade && m.view:
+		require.ErrorContains(t, err, "view eql_release")
+		m.state = m.installed // A failed Update keeps the refreshed state.
+	case upgrade && m.indexed && !m.rebuild:
+		require.ErrorContains(t, err, "allow_index_rebuild = true")
+		m.state = m.installed
+	case upgrade:
+		// Grants and indexes survive the reinstall.
+		require.NoError(t, err)
+		m.installed, m.state, m.stateRebuild = version, version, m.rebuild
 	case m.managed:
 		require.NoError(t, err)
-		m.state = m.installed
+		m.state, m.stateRebuild = m.installed, m.rebuild
 	case m.installed != "":
 		require.ErrorContains(t, err, "EQL installation refused") // Create never adopts.
 	default:
 		require.NoError(t, err)
-		m.installed, m.managed, m.state = version, true, version
+		m.installed, m.managed, m.state, m.stateRebuild = version, true, version, m.rebuild
 		createIndexedTable(t, m.db)
 		m.table, m.indexed = true, true
 	}
+}
+
+// toggleRebuild flips allow_index_rebuild and applies the configured version.
+func (m *eqlUpgradeModel) toggleRebuild(t rapid.TB) {
+	t.Helper()
+	m.rebuild = !m.rebuild
+	m.apply(t, m.config)
+}
+
+func (m *eqlUpgradeModel) grant(t rapid.TB) {
+	t.Helper()
+	_, err := m.db.Exec(m.ctx, fmt.Sprintf("GRANT USAGE ON SCHEMA eql_v4, eql_v4_internal TO %[1]s; ALTER DEFAULT PRIVILEGES IN SCHEMA eql_v4 GRANT EXECUTE ON FUNCTIONS TO %[1]s", m.role))
+	require.NoError(t, err)
+	m.granted = true
+}
+
+func (m *eqlUpgradeModel) addView(t rapid.TB) {
+	t.Helper()
+	_, err := m.db.Exec(m.ctx, "CREATE OR REPLACE VIEW eql_release AS SELECT eql_v4.version() AS version")
+	require.NoError(t, err)
+	m.view = true
+}
+
+func (m *eqlUpgradeModel) dropView(t rapid.TB) {
+	t.Helper()
+	_, err := m.db.Exec(m.ctx, "DROP VIEW IF EXISTS eql_release")
+	require.NoError(t, err)
+	m.view = false
 }
 
 func (m *eqlUpgradeModel) handInstall(t rapid.TB, version string) {
@@ -1259,8 +1335,8 @@ func (m *eqlUpgradeModel) handInstall(t rapid.TB, version string) {
 		m.table, m.indexed = true, true
 	} else {
 		// The installer drops both EQL schemas with CASCADE, taking every
-		// index on their functions, even when reinstalling the same version.
-		m.indexed = false
+		// index, view and grant on them, even when reinstalling the same version.
+		m.indexed, m.view, m.granted = false, false, false
 	}
 
 	m.installed = version
@@ -1295,12 +1371,12 @@ func (m *eqlUpgradeModel) importExisting(t rapid.TB) {
 		require.ErrorContains(t, err, "EQL is not installed")
 	default:
 		require.NoError(t, err)
-		m.managed, m.state = true, m.installed
+		m.managed, m.state, m.stateRebuild = true, m.installed, false // Import cannot know the configuration.
 	}
 }
 
 // destroy removes the resource block and applies. Destroy uninstalls EQL
-// unless a column still uses an EQL domain.
+// unless a column still uses an EQL domain or a view depends on EQL.
 func (m *eqlUpgradeModel) destroy(t rapid.TB) {
 	t.Helper()
 	m.write(t, "")
@@ -1308,12 +1384,12 @@ func (m *eqlUpgradeModel) destroy(t rapid.TB) {
 	switch {
 	case !m.managed:
 		require.NoError(t, err)
-	case m.table:
+	case m.table || m.view:
 		require.ErrorContains(t, err, "EQL uninstall refused")
 		m.state = m.installed // Planning refreshed, and a failed Delete keeps that state.
 	default:
 		require.NoError(t, err)
-		m.installed, m.managed, m.state, m.indexed = "", false, "", false
+		m.installed, m.managed, m.state, m.indexed, m.granted = "", false, "", false, false
 	}
 }
 
@@ -1346,6 +1422,15 @@ func (m *eqlUpgradeModel) check(t rapid.TB) {
 	if m.installed == "" {
 		require.Zero(t, eqlLeftovers(m.ctx, t, m.db), "EQL domains or functions remain in public without EQL")
 	}
+
+	var granted, view bool
+	require.NoError(t, m.db.QueryRow(m.ctx, `
+SELECT CASE WHEN to_regnamespace('eql_v4') IS NULL THEN false
+            ELSE has_schema_privilege($1, 'eql_v4', 'USAGE') AND has_schema_privilege($1, 'eql_v4_internal', 'USAGE')
+              AND EXISTS (SELECT FROM pg_default_acl WHERE defaclnamespace = to_regnamespace('eql_v4')) END,
+       to_regclass('public.eql_release') IS NOT NULL`, m.role).Scan(&granted, &view))
+	require.Equal(t, m.granted, granted, "grants differ from the model")
+	require.Equal(t, m.view, view, "view differs from the model")
 
 	// Terraform never touches user tables or indexes; only a reinstall drops
 	// the indexes. Index operator classes come from pg_index, because
@@ -1391,9 +1476,10 @@ WHERE x.indrelid = to_regclass('public.encrypted')`)
 	attributes := s.Values.RootModule.Resources[0].AttributeValues
 	require.Equal(t, m.db.Config().Database, attributes["id"])
 	require.Equal(t, m.state, attributes["version"], "state version differs from the model")
+	require.Equal(t, m.stateRebuild, attributes["allow_index_rebuild"], "state allow_index_rebuild differs from the model")
 	require.Equal(t, true, attributes["ore_available"])
 
-	if m.config == m.state && m.state == m.installed {
+	if m.config == m.state && m.state == m.installed && m.rebuild == m.stateRebuild {
 		m.writeResource(t)
 		changes, err := m.tf.Plan(m.ctx, m.reattach)
 		require.NoError(t, err)

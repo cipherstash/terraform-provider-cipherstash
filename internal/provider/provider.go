@@ -323,6 +323,7 @@ type manageClient interface {
 type eqlDatabase interface {
 	InspectEQL(ctx context.Context, database string) (eql.Installation, error)
 	InstallEQL(ctx context.Context, database, version string, requireORE bool) error
+	UpgradeEQL(ctx context.Context, database, from, to string, requireORE, rebuildIndexes bool) (eql.Report, error)
 	UninstallEQL(ctx context.Context, database string) error
 }
 

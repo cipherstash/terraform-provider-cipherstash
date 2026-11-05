@@ -52,6 +52,16 @@ func (d postgresDatabase) InstallEQL(ctx context.Context, database, version stri
 	return eql.Install(ctx, conn, version, requireORE)
 }
 
+func (d postgresDatabase) UpgradeEQL(ctx context.Context, database, from, to string, requireORE, rebuildIndexes bool) (eql.Report, error) {
+	conn, err := d.connect(ctx, database)
+	if err != nil {
+		return eql.Report{}, err
+	}
+	defer closeConn(ctx, conn)
+
+	return eql.Upgrade(ctx, conn, from, to, requireORE, rebuildIndexes)
+}
+
 func (d postgresDatabase) UninstallEQL(ctx context.Context, database string) error {
 	conn, err := d.connect(ctx, database)
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "3D000" {
