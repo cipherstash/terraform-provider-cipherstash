@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -28,18 +29,18 @@ func TestConfigureRejectsUnknownAndEmptyInputs(t *testing.T) {
 		config  providerModel
 		summary string
 	}{
-		{"unknown key", providerModel{CRN: types.StringValue("crn:ap-southeast-2.aws:7RVRVMCTYKZC5TU7"), AccessKey: types.StringUnknown()}, "Unknown access key"},
-		{"empty key", providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("")}, "Client access key required"},
-		{"malformed key", providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("selected-invalid-key-secret")}, "Invalid access key"},
-		{"unknown crn", providerModel{CRN: types.StringUnknown(), AccessKey: types.StringNull()}, "Workspace CRN required"},
-		{"empty crn", providerModel{CRN: types.StringValue(""), AccessKey: types.StringNull()}, "Workspace CRN required"},
-		{"malformed crn", providerModel{CRN: types.StringValue("invalid-crn"), AccessKey: types.StringNull()}, "Invalid workspace CRN"},
-		{"missing environment crn", providerModel{CRN: types.StringNull(), AccessKey: types.StringNull()}, "Workspace CRN required"},
-		{"malformed environment crn", providerModel{CRN: types.StringNull(), AccessKey: types.StringNull()}, "Invalid workspace CRN"},
-		{"missing environment key", providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringNull()}, "Client access key required"},
-		{"malformed environment key", providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringNull()}, "Invalid access key"},
-		{"legacy control environment key", providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringNull()}, "Client access key required"},
-		{"legacy cipherstash environment key", providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringNull()}, "Client access key required"},
+		{"unknown key", authConfig(types.StringValue("crn:ap-southeast-2.aws:7RVRVMCTYKZC5TU7"), types.StringUnknown()), "Unknown access key"},
+		{"empty key", authConfig(types.StringValue(testCRN), types.StringValue("")), "Client access key required"},
+		{"malformed key", authConfig(types.StringValue(testCRN), types.StringValue("selected-invalid-key-secret")), "Invalid access key"},
+		{"unknown crn", authConfig(types.StringUnknown(), types.StringNull()), "Workspace CRN required"},
+		{"empty crn", authConfig(types.StringValue(""), types.StringNull()), "Workspace CRN required"},
+		{"malformed crn", authConfig(types.StringValue("invalid-crn"), types.StringNull()), "Invalid workspace CRN"},
+		{"missing environment crn", authConfig(types.StringNull(), types.StringNull()), "Workspace CRN required"},
+		{"malformed environment crn", authConfig(types.StringNull(), types.StringNull()), "Invalid workspace CRN"},
+		{"missing environment key", authConfig(types.StringValue(testCRN), types.StringNull()), "Client access key required"},
+		{"malformed environment key", authConfig(types.StringValue(testCRN), types.StringNull()), "Invalid access key"},
+		{"legacy control environment key", authConfig(types.StringValue(testCRN), types.StringNull()), "Client access key required"},
+		{"legacy cipherstash environment key", authConfig(types.StringValue(testCRN), types.StringNull()), "Client access key required"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			switch tc.name {
@@ -75,6 +76,31 @@ func TestConfigureRejectsUnknownAndEmptyInputs(t *testing.T) {
 	}
 }
 
+func TestConfigureDatabaseOnlyNeverAuthenticates(t *testing.T) {
+	t.Setenv("CS_CLIENT_ACCESS_KEY", "CSAKenvironment.secret")
+	t.Setenv("CS_WORKSPACE_CRN", testCRN)
+	p := New()
+	t.Cleanup(p.Close)
+	cfg := providerModel{
+		Auth: types.ObjectNull(authAttributeTypes),
+		Database: types.ObjectValueMust(databaseAttributeTypes, map[string]attr.Value{
+			"host": types.StringValue("db.invalid"), "port": types.Int64Null(), "username": types.StringNull(),
+			"password": types.StringNull(), "sslmode": types.StringNull(), "sslrootcert": types.StringNull(),
+		}),
+	}
+	resp := configureFixture(t, p, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Error("database-only configuration contacted CipherStash")
+		return nil, http.ErrNotSupported
+	}), cfg)
+	require.False(t, resp.Diagnostics.HasError(), "unexpected configuration result: %v", resp.Diagnostics)
+
+	_, err := clientFromProviderData(resp.ResourceData)
+	require.ErrorIs(t, err, errNoAuth)
+	database, err := databaseFromProviderData(resp.ResourceData)
+	require.NoError(t, err)
+	require.NotNil(t, database)
+}
+
 func TestProtocolSchemaAndStop(t *testing.T) {
 	p := New()
 	server := Protocol6(p)
@@ -84,11 +110,12 @@ func TestProtocolSchemaAndStop(t *testing.T) {
 		require.NotEqual(t, tfprotov6.DiagnosticSeverityError, d.Severity, "%s: %s", d.Summary, d.Detail)
 	}
 
-	require.Len(t, resp.ResourceSchemas, 4)
+	require.Len(t, resp.ResourceSchemas, 5)
 	require.NotNil(t, resp.ResourceSchemas["cipherstash_cts_actor"])
 	require.NotNil(t, resp.ResourceSchemas["cipherstash_zerokms_client"])
 	require.NotNil(t, resp.ResourceSchemas["cipherstash_zerokms_keyset"])
 	require.NotNil(t, resp.ResourceSchemas["cipherstash_zerokms_keyset_grant"])
+	require.NotNil(t, resp.ResourceSchemas["cipherstash_eql_v4"])
 	require.Len(t, resp.DataSourceSchemas, 1)
 	require.NotNil(t, resp.DataSourceSchemas["cipherstash_zerokms_client"])
 	for range 2 {
@@ -148,7 +175,7 @@ func TestProviderCredentialPrecedence(t *testing.T) {
 			})
 			p := New()
 			t.Cleanup(p.Close)
-			configured := configureFixture(t, p, rt, providerModel{CRN: crn, AccessKey: key})
+			configured := configureFixture(t, p, rt, authConfig(crn, key))
 			noErrors(t, configured.Diagnostics)
 			select {
 			case got := <-observed:
@@ -173,7 +200,7 @@ func TestProviderInstancesKeepSeparateAuthentication(t *testing.T) {
 		t.Cleanup(p.Close)
 	}
 
-	cfg := providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")}
+	cfg := authConfig(types.StringValue(testCRN), types.StringValue("CSAKtestKeyId.testKeySecret"))
 	l := configureFixture(t, left, rt, cfg)
 	r := configureFixture(t, right, rt, cfg)
 	noErrors(t, l.Diagnostics)
@@ -217,7 +244,7 @@ func TestProviderReadCancellationRetainsState(t *testing.T) {
 	})
 	p := New()
 	t.Cleanup(p.Close)
-	configured := configureFixture(t, p, rt, providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")})
+	configured := configureFixture(t, p, rt, authConfig(types.StringValue(testCRN), types.StringValue("CSAKtestKeyId.testKeySecret")))
 	noErrors(t, configured.Diagnostics)
 	api, err := clientFromProviderData(configured.ResourceData)
 	require.NoError(t, err)

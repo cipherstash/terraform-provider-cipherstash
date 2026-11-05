@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/cipherstash/terraform-provider-cipherstash/internal/eql"
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -733,4 +735,159 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 			}
 		})
 	}
+}
+
+type testEQL struct {
+	inspect func(database string) (eql.Installation, error)
+	install func(database, version string, requireORE bool) error
+}
+
+func (d testEQL) InspectEQL(_ context.Context, database string) (eql.Installation, error) {
+	return d.inspect(database)
+}
+
+func (d testEQL) InstallEQL(_ context.Context, database, version string, requireORE bool) error {
+	return d.install(database, version, requireORE)
+}
+
+var (
+	testEQLVersion      = eql.Versions()[0]
+	upstreamDatabaseErr = &pgconn.PgError{Code: "XX000", Message: "fixture-upstream-secret"}
+)
+
+func installedEQL() eql.Installation {
+	return eql.Installation{Installed: true, Version: testEQLVersion, Owner: "postgres", OREAvailable: true, PgcryptoSchema: "public"}
+}
+
+func savedEQL() eqlModel {
+	digest, _ := eql.SHA256(testEQLVersion)
+
+	return eqlModel{
+		ID: types.StringValue("app"), Database: types.StringValue("app"), Version: types.StringValue(testEQLVersion), RequireORE: types.BoolValue(true),
+		Schema: types.StringValue(eql.Schema), InternalSchema: types.StringValue(eql.InternalSchema), SHA256: types.StringValue(digest),
+		OREAvailable: types.BoolValue(true), Owner: types.StringValue("postgres"), PgcryptoSchema: types.StringValue("public"),
+	}
+}
+
+func TestEQLCreateStateOnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		installErr, readErr      error
+		absent                   bool
+		wantError, wantState     bool
+		wantWarning, wantInspect bool
+	}{
+		{name: "installed", wantState: true, wantInspect: true},
+		{name: "refused", installErr: fmt.Errorf("%w: %w", eql.ErrAlreadyInstalled, upstreamDatabaseErr), wantError: true},
+		{name: "rolled back", installErr: upstreamDatabaseErr, wantError: true},
+		{name: "commit unknown and installed", installErr: fmt.Errorf("%w: %w", eql.ErrCommitUnknown, upstreamDatabaseErr), wantState: true, wantWarning: true, wantInspect: true},
+		{name: "commit unknown and absent", installErr: fmt.Errorf("%w: %w", eql.ErrCommitUnknown, upstreamDatabaseErr), absent: true, wantError: true, wantInspect: true},
+		{name: "commit unknown and read failed", installErr: fmt.Errorf("%w: %w", eql.ErrCommitUnknown, upstreamDatabaseErr), readErr: upstreamDatabaseErr, wantError: true, wantState: true, wantInspect: true},
+		{name: "read failed after commit", readErr: upstreamDatabaseErr, wantError: true, wantState: true, wantInspect: true},
+		{name: "not visible after commit", absent: true, wantError: true, wantState: true, wantInspect: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inspected := false
+			r := &eqlResource{database: testEQL{
+				install: func(database, version string, requireORE bool) error {
+					require.Equal(t, "app", database)
+					require.Equal(t, testEQLVersion, version)
+					require.False(t, requireORE)
+
+					return tc.installErr
+				},
+				inspect: func(string) (eql.Installation, error) {
+					inspected = true
+					if tc.readErr != nil || tc.absent {
+						return eql.Installation{}, tc.readErr
+					}
+
+					return installedEQL(), nil
+				},
+			}}
+			model := savedEQL()
+			model.ID, model.RequireORE, model.OREAvailable, model.Owner, model.PgcryptoSchema = types.StringUnknown(), types.BoolValue(false), types.BoolUnknown(), types.StringUnknown(), types.StringUnknown()
+			plan := resourceState(t, r, model)
+			resp := resource.CreateResponse{State: tfsdk.State{Schema: plan.Schema}}
+			r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(plan)}, &resp)
+			require.Equal(t, tc.wantError, resp.Diagnostics.HasError(), "%v", resp.Diagnostics)
+			require.Equal(t, tc.wantWarning, resp.Diagnostics.WarningsCount() > 0, "%v", resp.Diagnostics)
+			require.Equal(t, !tc.wantState, resp.State.Raw.IsNull())
+			require.Equal(t, tc.wantInspect, inspected)
+			require.NotContains(t, fmt.Sprint(resp.Diagnostics), "fixture-upstream-secret")
+			if tc.wantState {
+				var saved eqlModel
+				noErrors(t, resp.State.Get(context.Background(), &saved))
+				require.Equal(t, "app", saved.ID.ValueString())
+				require.False(t, saved.RequireORE.ValueBool())
+			}
+		})
+	}
+}
+
+func TestEQLRefreshImportAndDelete(t *testing.T) {
+	for _, scenario := range []string{"present", "changed", "absent", "failed read"} {
+		t.Run(scenario, func(t *testing.T) {
+			r := &eqlResource{database: testEQL{inspect: func(database string) (eql.Installation, error) {
+				require.Equal(t, "app", database)
+				switch scenario {
+				case "changed":
+					return eql.Installation{Installed: true, Version: "go-0.0.1", Owner: "admin"}, nil
+				case "absent":
+					return eql.Installation{PgcryptoSchema: "public"}, nil
+				case "failed read":
+					return eql.Installation{}, upstreamDatabaseErr
+				}
+
+				return installedEQL(), nil
+			}}}
+			before := resourceState(t, r, savedEQL())
+
+			read := resource.ReadResponse{State: before}
+			r.Read(context.Background(), resource.ReadRequest{State: before}, &read)
+			require.Equal(t, scenario == "failed read", read.Diagnostics.HasError(), "%v", read.Diagnostics)
+			require.NotContains(t, fmt.Sprint(read.Diagnostics), "fixture-upstream-secret")
+			switch scenario {
+			case "present", "failed read":
+				require.True(t, read.State.Raw.Equal(before.Raw), "refresh changed an unchanged installation")
+			case "absent":
+				require.True(t, read.State.Raw.IsNull(), "absent installation remains in state")
+			case "changed":
+				var after eqlModel
+				noErrors(t, read.State.Get(context.Background(), &after))
+				require.Equal(t, "go-0.0.1", after.Version.ValueString())
+				require.True(t, after.SHA256.IsNull(), "unknown version kept a digest")
+				require.False(t, after.OREAvailable.ValueBool())
+				require.Equal(t, "admin", after.Owner.ValueString())
+				require.True(t, after.PgcryptoSchema.IsNull())
+			}
+
+			imported := resource.ImportStateResponse{State: tfsdk.State{Schema: before.Schema}}
+			r.ImportState(context.Background(), resource.ImportStateRequest{ID: "app"}, &imported)
+			require.Equal(t, scenario == "absent" || scenario == "failed read", imported.Diagnostics.HasError(), "%v", imported.Diagnostics)
+			if scenario == "present" {
+				require.True(t, imported.State.Raw.Equal(before.Raw), "import differs from a created installation")
+			}
+
+			deleted := resource.DeleteResponse{State: before}
+			r.Delete(context.Background(), resource.DeleteRequest{State: before}, &deleted)
+			require.Equal(t, scenario != "absent", deleted.Diagnostics.HasError(), "%v", deleted.Diagnostics)
+			require.NotContains(t, fmt.Sprint(deleted.Diagnostics), "fixture-upstream-secret")
+			if scenario != "absent" {
+				require.True(t, deleted.State.Raw.Equal(before.Raw), "failed delete discarded the installation")
+			}
+		})
+	}
+}
+
+func TestEQLPlanRejectsVersionChange(t *testing.T) {
+	r := &eqlResource{}
+	state := resourceState(t, r, savedEQL())
+	changed := savedEQL()
+	changed.Version = types.StringValue("go-0.0.1")
+	planned := resourceState(t, r, changed)
+	resp := resource.ModifyPlanResponse{Plan: tfsdk.Plan(planned)}
+	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{State: state, Plan: tfsdk.Plan(planned)}, &resp)
+	require.True(t, resp.Diagnostics.HasError())
+	require.Equal(t, "EQL upgrades are not supported", resp.Diagnostics[0].Summary())
 }

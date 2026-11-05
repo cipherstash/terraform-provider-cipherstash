@@ -67,7 +67,7 @@ func (r *keysetGrantResource) Schema(_ context.Context, _ resource.SchemaRequest
 func (r *keysetGrantResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	client, err := clientFromProviderData(req.ProviderData)
 	if err != nil {
-		resp.Diagnostics.AddError("Unexpected provider data", err.Error())
+		providerDataError(&resp.Diagnostics, err)
 		return
 	}
 

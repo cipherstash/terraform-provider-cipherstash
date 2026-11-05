@@ -51,6 +51,20 @@ printf 'provider_installation {\n  filesystem_mirror {\n    path = "%s"\n    inc
 printf 'Set TF_CLI_CONFIG_FILE=%s/.local/terraform.rc\n' "$PWD"
 '''
 
+[tasks."test:postgres"]
+description = "Run the PostgreSQL tests against the superuser connection in CS_TEST_POSTGRES_URL"
+run = '''
+set -eu
+if [ -z "${CS_TEST_POSTGRES_URL:-}" ]; then
+  echo 'Set CS_TEST_POSTGRES_URL to a PostgreSQL superuser connection URL.' >&2
+  exit 1
+fi
+go test -race ./internal/eql -run Postgres -count=1
+# The upgrade model runs Terraform per step, so bound rapid's budget: 10 random
+# traces of about 10 actions, after its fixed traces of every upgrade path.
+TF_ACC= go test -race ./internal/provider -run Postgres -count=1 -rapid.checks=10 -rapid.steps=10
+'''
+
 [tasks."test:acc"]
 description = "Run LIVE actor/client acceptance in an explicitly approved workspace (requires TF_ACC=1)"
 run = '''

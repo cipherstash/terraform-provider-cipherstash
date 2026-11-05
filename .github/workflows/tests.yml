@@ -3,7 +3,9 @@ name: Tests
 # check runs `mise run check`: the offline, race-enabled Go and Terraform CLI
 # tests, go vet and the gofmt check, with the Go and Terraform versions pinned
 # in mise.toml. The task clears TF_ACC, so the live acceptance test skips and
-# the job needs no CipherStash credentials. lint runs `mise run lint` with the
+# the job needs no CipherStash credentials. postgres runs `mise run
+# test:postgres`, the EQL install tests, against a PostgreSQL service container
+# for each supported major version. lint runs `mise run lint` with the
 # golangci-lint version pinned in mise.test.toml. generated runs
 # `mise run codegen` (go generate for docs/ and the API clients) and fails if
 # it changes the tree.
@@ -61,6 +63,42 @@ jobs:
 
       - name: golangci-lint
         run: mise run lint
+
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: ["16", "17"]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CS_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          cache: true
+
+      - name: PostgreSQL tests
+        run: mise run test:postgres
 
   generated:
     name: Generated files

@@ -16,6 +16,7 @@ import (
 
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth"
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -124,6 +125,14 @@ func configureFixture(t *testing.T, p *Provider, rt http.RoundTripper, cfg provi
 	p.Configure(ctx, frameworkprovider.ConfigureRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: state.Raw}}, &resp)
 
 	return resp
+}
+
+// authConfig is a provider configuration with only auth settings.
+func authConfig(crn, key types.String) providerModel {
+	return providerModel{
+		Auth:     types.ObjectValueMust(authAttributeTypes, map[string]attr.Value{"workspace_crn": crn, "client_access_key": key}),
+		Database: types.ObjectNull(databaseAttributeTypes),
+	}
 }
 
 func fixtureClient(t *testing.T, rt http.RoundTripper) *manage.Client {
@@ -237,7 +246,7 @@ func TestProviderOwnsAuthenticationAcrossCallsAndCancelsOnReconfigureAndStop(t *
 	t.Setenv("CS_CLIENT_ACCESS_KEY", "CSAKtestKeyId.testKeySecret")
 	p := New()
 	t.Cleanup(p.Close)
-	cfg := providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringNull()}
+	cfg := authConfig(types.StringValue(testCRN), types.StringNull())
 	configured := configureFixture(t, p, rt, cfg)
 	noErrors(t, configured.Diagnostics)
 	api, err := clientFromProviderData(configured.ResourceData)
@@ -264,7 +273,7 @@ func TestProviderRejectsWrongVerifiedRole(t *testing.T) {
 			})
 			p := New()
 			t.Cleanup(p.Close)
-			configured := configureFixture(t, p, rt, providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")})
+			configured := configureFixture(t, p, rt, authConfig(types.StringValue(testCRN), types.StringValue("CSAKtestKeyId.testKeySecret")))
 			require.True(t, configured.Diagnostics.HasError(), "%v", configured.Diagnostics)
 			require.Nil(t, configured.ResourceData)
 			require.Nil(t, configured.DataSourceData)
@@ -282,7 +291,7 @@ func TestProviderDefersAuthorizationToServices(t *testing.T) {
 			})
 			p := New()
 			t.Cleanup(p.Close)
-			configured := configureFixture(t, p, rt, providerModel{CRN: types.StringValue(testCRN), AccessKey: types.StringValue("CSAKtestKeyId.testKeySecret")})
+			configured := configureFixture(t, p, rt, authConfig(types.StringValue(testCRN), types.StringValue("CSAKtestKeyId.testKeySecret")))
 			noErrors(t, configured.Diagnostics)
 			api, err := clientFromProviderData(configured.ResourceData)
 			require.NoError(t, err, "configuration must leave request authorization to the services")

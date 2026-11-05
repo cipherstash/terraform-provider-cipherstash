@@ -58,7 +58,7 @@ func (d *clientDataSource) Schema(_ context.Context, _ datasource.SchemaRequest,
 func (d *clientDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
 	client, err := clientFromProviderData(req.ProviderData)
 	if err != nil {
-		resp.Diagnostics.AddError("Unexpected provider data", err.Error())
+		providerDataError(&resp.Diagnostics, err)
 		return
 	}
 

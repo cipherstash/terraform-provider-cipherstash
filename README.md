@@ -1,6 +1,6 @@
 # Terraform provider for CipherStash
 
-Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; this repository's `pkg/stack/auth` and `pkg/stack/manage` packages handle authentication and service requests.
+Use this provider to manage machine identities, ZeroKMS clients, keysets, and keyset grants in a CipherStash workspace, and to install EQL v4 into PostgreSQL databases. You can also look up an existing client without managing it. The provider handles Terraform configuration and state; this repository's `pkg/stack/auth` and `pkg/stack/manage` packages handle authentication and service requests.
 
 **This provider is in development and is not published to the Terraform Registry.** Local builds use `terraform.local/cipherstash/cipherstash` at version `0.0.1`. No BNDRY module, sibling SDK checkout, local module replacement, Rust toolchain or WebAssembly authentication guest is required. See [Distribution and licensing](#distribution-and-licensing) before distributing source or binaries.
 
@@ -37,24 +37,65 @@ The linked CipherStash documentation explains the product concepts. This reposit
 
 ## Configure the provider
 
-Set `workspace_crn` or `CS_WORKSPACE_CRN` to the workspace's [CipherStash Resource Name (CRN)](https://cipherstash.com/docs/reference/workspace/configuration), in the format `crn:<region>.aws:<workspace ID>`. The CRN identifies both the workspace and its region. The provider does not discover a workspace or read a saved profile.
+The provider block has two optional nested attributes, and each half of the provider is on only when its attribute is present:
 
-Use an Admin access key. This is required for every provider configuration, including roots that manage only ZeroKMS resources or read data sources. Control-only credentials that previously configured the provider are now rejected. Create this credential outside the Terraform configuration that uses it: the provider cannot safely manage its own authentication credential. See the [provider reference](docs/index.md) for the credential arguments.
+- `auth` connects to a CipherStash workspace. Every `cts` and `zerokms` resource and data source requires it. Without it, the provider never reads `CS_*` environment variables and never contacts CipherStash.
+- `database` connects to a PostgreSQL server. `cipherstash_eql_v4` requires it. Without it, the provider never opens a database connection.
+
+A resource whose half is missing fails with "Provider auth settings required" or "Provider database settings required". A root that only installs EQL needs no CipherStash credentials, and a root that only manages workspace objects needs no database.
+
+### Connect to CipherStash
+
+Set `auth.workspace_crn` or `CS_WORKSPACE_CRN` to the workspace's [CipherStash Resource Name (CRN)](https://cipherstash.com/docs/reference/workspace/configuration), in the format `crn:<region>.aws:<workspace ID>`. The CRN identifies both the workspace and its region. The provider does not discover a workspace or read a saved profile.
+
+Use an Admin access key. Every `auth` configuration requires one, including roots that manage only ZeroKMS resources or read data sources. Control-only credentials that previously configured the provider are now rejected. Create this credential outside the Terraform configuration that uses it: the provider cannot safely manage its own authentication credential. See the [provider reference](docs/index.md) for the credential arguments.
 
 ```hcl
 provider "cipherstash" {
-  workspace_crn = var.workspace_crn
-  # Supply an Admin credential through CS_CLIENT_ACCESS_KEY.
+  auth = {
+    workspace_crn = var.workspace_crn
+    # Supply an Admin credential through CS_CLIENT_ACCESS_KEY.
+  }
 }
 ```
 
-Supply the key securely through `CS_CLIENT_ACCESS_KEY` or the sensitive `client_access_key` argument. For both `workspace_crn` and `client_access_key`, an omitted or null argument uses its environment variable. Explicit known values override the environment. Empty, unknown or malformed selected values fail without falling back to another source. Credentials without Admin, including Control-only and Member-only credentials, are rejected even though the environment variable is named `CS_CLIENT_ACCESS_KEY`.
+Supply the key securely through `CS_CLIENT_ACCESS_KEY` or the sensitive `client_access_key` argument. For both `workspace_crn` and `client_access_key`, an omitted or null argument uses its environment variable; `auth = {}` takes both from the environment. Explicit known values override the environment. Empty, unknown or malformed selected values fail without falling back to another source. Credentials without Admin, including Control-only and Member-only credentials, are rejected even though the environment variable is named `CS_CLIENT_ACCESS_KEY`.
 
-This is a breaking configuration change: replace the provider's `crn` argument with `workspace_crn`, and `access_key` or `control_access_key` with `client_access_key`. Replace `CIPHERSTASH_ACCESS_KEY` or `CS_CONTROL_ACCESS_KEY` with `CS_CLIENT_ACCESS_KEY`. Old arguments are rejected and old environment names are ignored; there are no compatibility aliases. The actor resource's computed `access_key` and all client/keyset resource arguments are unchanged. The provider argument rename alone does not change resource state.
 
 `CS_CLIENT_ID` identifies an application encryption client, not an authentication principal. Neither `manage.Config` nor the provider requires or reads it, and neither automatically grants that client access. Use `cipherstash_zerokms_keyset_grant` to manage explicit pairs. Application client keys remain separate from provider authentication.
 
 Native authentication verifies each exchanged token's RS256 signature against the CipherStash Token Service (CTS) signing keys, issuer, audience, expiry, workspace and Admin role. It also validates the advertised ZeroKMS endpoint before use. Each provider instance owns its token cache and authentication lifetime; reconfiguration and shutdown cancel token refresh. CTS and ZeroKMS still authorize each service request. Successful provider configuration does not prove that a later administration request will be permitted. Use the narrower Member or Control roles for application workloads where appropriate; the provider's Admin requirement does not mean your application needs Admin.
+
+### Connect to PostgreSQL
+
+`database` takes `host`, `port`, `username`, `password`, `sslmode` and `sslrootcert`. Unset arguments fall back to libpq's `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGSSLMODE` and `PGSSLROOTCERT`, and to the password file. There is no database name: each `cipherstash_eql_v4` resource names the database it installs into. Use `sslmode = "verify-full"` outside local development.
+
+```hcl
+provider "cipherstash" {
+  database = {
+    host     = aws_rds_cluster.app.endpoint
+    username = "postgres"
+    password = ephemeral.aws_secretsmanager_secret_version.master.secret_string
+    sslmode  = "verify-full"
+  }
+}
+```
+
+The provider opens one connection per operation and only when a resource needs it, so these values may come from resources created in the same apply. Operations that run before those values are known fail with a fixed message. Database diagnostics describe the failure by its SQLSTATE class and never include PostgreSQL's message, which can quote submitted values; PostgreSQL notices go to the provider's debug log.
+
+### Migrate from top-level credentials
+
+This is a breaking configuration change with no compatibility aliases. Move the credential arguments into `auth`:
+
+| Before | After |
+| --- | --- |
+| `workspace_crn = …` | `auth = { workspace_crn = … }` |
+| `client_access_key = …` | `auth = { client_access_key = … }` |
+| An empty provider block configured from `CS_*` variables | `auth = {}` |
+
+The old top-level arguments are rejected with "Unsupported argument". An empty provider block no longer reads `CS_WORKSPACE_CRN` or `CS_CLIENT_ACCESS_KEY`: CipherStash resources then fail with "Provider auth settings required". Resource arguments and state are unchanged.
+
+Earlier names are also rejected or ignored: the `crn`, `access_key` and `control_access_key` arguments, and the `CIPHERSTASH_ACCESS_KEY` and `CS_CONTROL_ACCESS_KEY` environment variables.
 
 ### Protect state and credentials
 
@@ -64,7 +105,7 @@ Use an encrypted state backend with restricted access. Protect backups and saved
 
 ## Choose what Terraform manages
 
-Names identify the owning service: `cts` means CipherStash Token Service, which manages actors and their authentication access keys; `zerokms` identifies encryption clients, keysets and grants. An actor's `access_key` and a ZeroKMS client's `client_key` are different credentials.
+Names identify the owning service: `cts` means CipherStash Token Service, which manages actors and their authentication access keys; `zerokms` identifies encryption clients, keysets and grants; `eql` identifies Encrypt Query Language, the PostgreSQL types and functions for encrypted values. An actor's `access_key` and a ZeroKMS client's `client_key` are different credentials.
 
 | Resource or data source | What it manages | Change behavior |
 | --- | --- | --- |
@@ -73,6 +114,7 @@ Names identify the owning service: `cts` means CipherStash Token Service, which 
 | [`cipherstash_zerokms_keyset`](docs/resources/zerokms_keyset.md) | A keyset's name, description, and enabled status | Updates the existing keyset. Destroy disables it; it does not delete key material. |
 | [`cipherstash_zerokms_keyset_grant`](docs/resources/zerokms_keyset_grant.md) | One client/keyset grant | Changing either ID replaces the grant. Destroy revokes only that pair. |
 | [`cipherstash_zerokms_client` data source](docs/data-sources/zerokms_client.md) | Read-only client metadata | Does not import, change, or delete the client or its grants. |
+| [`cipherstash_eql_v4`](docs/resources/eql_v4.md) | EQL v4 installed in one PostgreSQL database | Changing `database` replaces it; changing `version` is rejected. Destroy never uninstalls EQL. |
 
 These names replace the earlier development types `cipherstash_actor`, `cipherstash_client`, `cipherstash_keyset` and `cipherstash_keyset_grant`. The old names are not registered, and there is no automatic cross-type state migration. If existing state uses the old types, retain the previous provider binary and protected state backups until you have planned a migration. Changing HCL type names alone does not migrate state. Import cannot recover creation-only credentials.
 
@@ -101,6 +143,77 @@ data "cipherstash_zerokms_client" "api" {
 ```
 
 The lookup returns the client's `name`, `description`, and all granted `keyset_ids`, including disabled keysets. No grants produces an empty set; a missing client or failed lookup produces an error. The lookup does not select a keyset or retrieve the client key value. Keep existing secrets in your secret store. Removing the data source does not delete the client.
+
+### Install EQL v4
+
+`cipherstash_eql_v4` installs EQL v4 into the database named by `database`, on the server from the provider's `database` settings. `version` must be a version compiled into the provider, such as `go-0.1.0-rc.3`; the provider contains each version's `eql-v4-install.sql` release asset byte for byte and checks it against its SHA-256. Until cipherstash/stack publishes a stable Go release, the provider contains only the latest release candidate and the one before it.
+
+```hcl
+resource "postgresql_extension" "pgcrypto" {
+  name   = "pgcrypto"
+  schema = "public"
+}
+
+resource "cipherstash_eql_v4" "app" {
+  database   = "app"
+  version    = "go-0.1.0-rc.3"
+  depends_on = [postgresql_extension.pgcrypto]
+}
+```
+
+Create runs the installer in one transaction with `search_path = public`, under the advisory lock the `stash` CLI uses, and with its own lock and statement timeouts. It changes nothing and fails if:
+
+- the database already has an `eql_v4` or `eql_v4_internal` schema, including a partial one: import an existing installation with `terraform import cipherstash_eql_v4.app app` or an `import` block instead;
+- another installation holds the lock;
+- `pgcrypto` is in a schema other than `public` or `extensions`;
+- the role lacks `CREATE` on the database or on `public`;
+- after the installer runs, `eql_v4.version()` does not match, or the ORE operator class is missing while `require_ore` is `true` (the default). Creating that class needs a superuser, or `rds_superuser` on Amazon RDS and Aurora. Set `require_ore = false` to accept an installation whose 20 ORE-backed domains are disabled.
+
+Install `pgcrypto` first, as above. Without it, the installer creates `pgcrypto` in a new `extensions` schema, and every role that compares ORE-encrypted values also needs `USAGE` on that schema.
+
+EQL issues no grants. Roles that query encrypted columns need `USAGE` on both EQL schemas. Grant it with the community PostgreSQL provider and reference the resource's `schema` and `internal_schema` attributes, so one apply installs EQL before granting on it:
+
+```hcl
+resource "postgresql_grant" "app_eql" {
+  for_each    = toset([cipherstash_eql_v4.app.schema, cipherstash_eql_v4.app.internal_schema])
+  database    = "app"
+  role        = "app"
+  schema      = each.key
+  object_type = "schema"
+  privileges  = ["USAGE"]
+}
+```
+
+Refresh reads the installed version, owner, ORE availability and `pgcrypto` schema, and removes the resource only when a successful read shows EQL absent. The provider cannot upgrade EQL yet: the installer drops and re-creates both EQL schemas, removing every grant and every index built on EQL functions, so changing `version` is rejected at plan time. Upgrade by hand instead, as below.
+
+#### Upgrade EQL by hand
+
+Plan a maintenance window: from the reinstall until the grants are restored, roles other than the installing role get `permission denied for schema eql_v4`, and queries cannot use the dropped indexes until they are re-created.
+
+1. Record the indexes that the reinstall will drop:
+
+   ```sql
+   SELECT DISTINCT pg_get_indexdef(d.objid) || ';'
+   FROM pg_depend d
+   JOIN pg_proc p ON p.oid = d.refobjid
+   WHERE d.classid = 'pg_class'::regclass
+     AND d.refclassid = 'pg_proc'::regclass
+     AND p.pronamespace IN ('eql_v4'::regnamespace, 'eql_v4_internal'::regnamespace);
+   ```
+
+2. Stop managing the installation without changing the database: `terraform state rm cipherstash_eql_v4.app`. Don't apply until step 4, because Create refuses an existing installation.
+3. Run the new version's `eql-v4-install.sql`, from the cipherstash/stack Go release, as the role that installed EQL, in one transaction with `search_path` set to `public`:
+
+   ```sh
+   PGOPTIONS='-c search_path=public' psql --single-transaction -v ON_ERROR_STOP=1 -f eql-v4-install.sql
+   ```
+
+4. Set `version` to the new version, import the installation with `terraform import cipherstash_eql_v4.app app` or an `import` block, and apply. Grant resources such as `postgresql_grant` find the `USAGE` grants missing and grant them again in the same apply.
+5. Run the statements from step 1, then `ANALYZE` the tables they index.
+
+The installer creates the column types in `public` only when they don't exist, so an upgraded database keeps the column types of the version first installed. Check the release notes for changes to them before upgrading.
+
+Destroy does not uninstall EQL: uninstalling would break every column typed with an EQL domain, and the domains in `public` would remain. Destroy fails while EQL is installed and succeeds once it is gone. To stop managing an installation, use a `removed` block with `lifecycle { destroy = false }` or `terraform state rm`. Because Terraform destroys dependents first, a `terraform destroy` of a root like the one above revokes the grants before failing on EQL.
 
 ## Understand lifecycle and recovery
 
@@ -222,16 +335,17 @@ A lockfile generated from the local mirror describes your local build, not a pub
 | --- | --- |
 | `mise run check` | Runs race-enabled tests, Go vet, and Go formatting checks without changing tracked files or contacting live services. |
 | `mise run test` | Runs offline Terraform CLI and fixture tests with `TF_ACC` cleared, even if acceptance is enabled in your shell. The race detector needs a C toolchain. |
+| `mise run test:postgres` | Runs the EQL installation tests against the PostgreSQL superuser connection in `CS_TEST_POSTGRES_URL`. Each test creates and drops its own database and roles. It limits the upgrade model to 10 random traces of about 10 actions, after its fixed traces. |
 | `mise run build` | Builds the local provider binary. |
 | `mise run codegen` | Runs `go generate ./...`: generates reference pages from Go schema descriptions using tfplugindocs 0.25.0, and the API clients under `pkg/stack/internal` using oapi-codegen. Edit those descriptions, not `docs/` directly. CI fails if the committed files differ from the output. |
 | `mise run --env test lint` | Runs optional golangci-lint 2.14.0 from `mise.test.toml`. It is separate from `check`. |
 | `mise run --env docs site` | Builds the documentation site from `docs/` with Zensical, pinned in `mise.docs.toml`, into `site/`. `mise run --env docs site:serve` previews it. The Docs workflow publishes it to the `gh-pages` branch when `docs/` changes on `main`. |
 
-Documentation generation and live acceptance are not part of `check`. This repository does not configure Rust, guest builds, or local services, and does not force `CGO_ENABLED=0`.
+Documentation generation, the PostgreSQL tests and live acceptance are not part of `check`. To run the PostgreSQL tests locally, start a disposable server, for example `docker run --detach --name eql-test --env POSTGRES_PASSWORD=postgres --publish 55432:5432 postgres:17`, and set `CS_TEST_POSTGRES_URL='postgres://postgres:postgres@localhost:55432/postgres?sslmode=disable'`. This repository does not configure Rust or guest builds, and does not force `CGO_ENABLED=0`.
 
 ### Understand test coverage
 
-The offline suite has four layers:
+The offline suite has four layers, and a fifth runs against PostgreSQL:
 
 | Layer | What it establishes |
 | --- | --- |
@@ -239,6 +353,7 @@ The offline suite has four layers:
 | Direct native-backed tests (`failures_test.go`, `crud_test.go`, `provider_test.go`) | State retention on failed inventory reads, pagination and metadata ambiguity, partial keyset writes, uncertain grant/revoke outcomes, confirmed destroy, credential precedence, independent authentication lifetimes and cancellation. Native authentication verifies signed fixture tokens against local signing-key and HTTP fixtures; upstream error bodies must not enter diagnostics. |
 | Direct resource tests (`resources_test.go`) | Focused reconciliation tests with injected `manage` client results, including import restrictions, missing objects and partial failures. |
 | Public SDK (`pkg/stack/auth`, `pkg/stack/manage`) | Signed-token validation and refresh, service request contracts, malformed-inventory rejection, zero-grant clients, one-time secret export, cancellation, and no write retries or redirects. These tests use local service fixtures, not live credentials. |
+| PostgreSQL (`internal/eql`, `TestCLIPostgres*` in `cli_test.go`) | Runs only with `CS_TEST_POSTGRES_URL`. Installs EQL as a superuser and as a role without it, checks that every refusal leaves the database unchanged, and runs Terraform against the database: apply, import, refresh after an out-of-band uninstall, destroy refusal, and import of an installation made outside Terraform. A rapid state machine (`TestCLIPostgresEQLUpgradeModel`) runs Terraform through every upgrade path between the compiled-in versions: changing `version` is rejected with nothing changed, and an upgrade made by hand is adopted by removing the resource from state, reinstalling and importing. It also checks that no Terraform action changes a table of EQL-typed columns or its functional indexes, that a reinstall drops those indexes, and that re-creating them binds the expected operator classes. The Tests workflow runs it against PostgreSQL 16 and 17. |
 
 CLI tests use `resource.UnitTest`, so they run without live-acceptance opt-in. They require the pinned Terraform on `PATH` and fail rather than download another version. Run them through mise, which supplies the actual executable rather than a tool shim. Each case uses a temporary CLI configuration and fake credentials. The in-process provider's transport only permits local fixture routing. Tests run serially because they replace the process-default transport and environment. This setup tests separate provider session ownership directly, not Terraform provider aliases or binary installation.
 

@@ -1,0 +1,12 @@
+[
+  {
+    "eqlVersion": "go-0.1.0-rc.2",
+    "releaseTag": "languages/golang/v0.1.0-rc.2",
+    "installSqlSha256": "90c0542e46e9706088e1f08eb9695b6b65858e4cd2347561eed81c1599a3ca41"
+  },
+  {
+    "eqlVersion": "go-0.1.0-rc.3",
+    "releaseTag": "languages/golang/v0.1.0-rc.3",
+    "installSqlSha256": "58f96a4dc78e12aa4ff29124534e49197967bce2fca8fecb5ea0942ca68b9f3e"
+  }
+]

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cipherstash/terraform-provider-cipherstash/internal/eql"
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-plugin"
@@ -27,6 +29,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/statecheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/hashicorp/terraform-plugin-testing/tfjsonpath"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
@@ -34,8 +37,10 @@ import (
 
 const cliProvider = `
 provider "cipherstash" {
-  workspace_crn = "crn:ap-southeast-2.aws:ZVATKW3VHMFG27DY"
-  client_access_key = "CSAKtestKeyId.testKeySecret"
+  auth = {
+    workspace_crn     = "crn:ap-southeast-2.aws:ZVATKW3VHMFG27DY"
+    client_access_key = "CSAKtestKeyId.testKeySecret"
+  }
 }
 `
 
@@ -618,22 +623,26 @@ func TestCLIMalformedInventoryRecovery(t *testing.T) {
 
 func TestCLIProviderConfiguration(t *testing.T) {
 	for _, test := range []struct{ name, config, error string }{
-		{"omitted uses environment", `provider "cipherstash" {}`, ""},
-		{"null uses environment", "provider \"cipherstash\" {\n workspace_crn = null\n client_access_key = null\n}", ""},
+		{"empty auth uses environment", `provider "cipherstash" { auth = {} }`, ""},
+		{"null uses environment", "provider \"cipherstash\" {\n auth = {\n workspace_crn = null\n client_access_key = null\n }\n}", ""},
 		{"explicit overrides environment", cliProvider, ""},
-		{"empty crn", `provider "cipherstash" { workspace_crn = "" }`, "Workspace CRN required"},
-		{"empty key", `provider "cipherstash" { client_access_key = "" }`, "Client access key required"},
-		{"malformed crn", `provider "cipherstash" { workspace_crn = "invalid" }`, "Invalid workspace CRN"},
-		{"malformed key", `provider "cipherstash" { client_access_key = "invalid" }`, "Invalid access key"},
+		{"no auth ignores environment", `provider "cipherstash" {}`, "Provider auth settings required"},
+		{"database without auth ignores environment", `provider "cipherstash" { database = { host = "localhost" } }`, "Provider auth settings required"},
+		{"empty crn", `provider "cipherstash" { auth = { workspace_crn = "" } }`, "Workspace CRN required"},
+		{"empty key", `provider "cipherstash" { auth = { client_access_key = "" } }`, "Client access key required"},
+		{"malformed crn", `provider "cipherstash" { auth = { workspace_crn = "invalid" } }`, "Invalid workspace CRN"},
+		{"malformed key", `provider "cipherstash" { auth = { client_access_key = "invalid" } }`, "Invalid access key"},
+		{"old top-level crn argument", `provider "cipherstash" { workspace_crn = "crn:ap-southeast-2.aws:ZVATKW3VHMFG27DY" }`, "Unsupported argument"},
+		{"old top-level key argument", `provider "cipherstash" { client_access_key = "CSAKtestKeyId.testKeySecret" }`, "Unsupported argument"},
 		{"old crn argument", `provider "cipherstash" { crn = "invalid" }`, "Unsupported argument"},
 		{"old control key argument", `provider "cipherstash" { control_access_key = "CSAKlegacy.secret" }`, "Unsupported argument"},
 		{"old access key argument", `provider "cipherstash" { access_key = "CSAKlegacy.secret" }`, "Unsupported argument"},
-		{"legacy control environment", `provider "cipherstash" {}`, "Client access key required"},
-		{"legacy cipherstash environment", `provider "cipherstash" {}`, "Client access key required"},
-		{"malformed environment crn", `provider "cipherstash" {}`, "Invalid workspace CRN"},
-		{"malformed environment key", `provider "cipherstash" {}`, "Invalid access key"},
-		{"control credential", `provider "cipherstash" {}`, "Cannot authenticate with CipherStash"},
-		{"member credential", `provider "cipherstash" {}`, "Cannot authenticate with CipherStash"},
+		{"legacy control environment", `provider "cipherstash" { auth = {} }`, "Client access key required"},
+		{"legacy cipherstash environment", `provider "cipherstash" { auth = {} }`, "Client access key required"},
+		{"malformed environment crn", `provider "cipherstash" { auth = {} }`, "Invalid workspace CRN"},
+		{"malformed environment key", `provider "cipherstash" { auth = {} }`, "Invalid access key"},
+		{"control credential", `provider "cipherstash" { auth = {} }`, "Cannot authenticate with CipherStash"},
+		{"member credential", `provider "cipherstash" { auth = {} }`, "Cannot authenticate with CipherStash"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("CS_WORKSPACE_CRN", testCRN)
@@ -1122,15 +1131,13 @@ func TestCLIClientSeedSavedPlan(t *testing.T) {
 
 // Generate short command sequences against Terraform, not synthetic ModifyPlan
 // inputs: ignore_changes and replacement replanning belong to Terraform itself.
-func TestCLIClientLifecycleModel(t *testing.T) {
-	f := newServiceFixture(t)
-	cliTestCase(t, f) // Reuse pinned CLI, isolated CLI config and native auth transport.
+// reattachProvider serves one in-process provider for tfexec commands until
+// the test ends, so model tests skip plugin-testing's per-step setup.
+func reattachProvider(t *testing.T) *tfexec.ReattachOption {
+	t.Helper()
 	p := New()
-	defer p.Close()
 
 	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-
 	configs := make(chan *plugin.ReattachConfig, 1)
 	closed := make(chan struct{})
 	served := make(chan error, 1)
@@ -1143,24 +1150,33 @@ func TestCLIClientLifecycleModel(t *testing.T) {
 	select {
 	case config = <-configs:
 	case err := <-served:
+		cancel()
 		t.Fatalf("provider server exited before reattach: %v", err)
 	case <-time.After(10 * time.Second):
+		cancel()
 		t.Fatal("provider server did not start")
 	}
 
-	defer func() {
+	t.Cleanup(func() {
 		cancel()
 		<-closed
 		require.NoError(t, <-served)
-	}()
+		p.Close()
+	})
 
-	reattach := tfexec.Reattach(tfexec.ReattachInfo{
+	return tfexec.Reattach(tfexec.ReattachInfo{
 		"registry.terraform.io/hashicorp/cipherstash": {
 			Protocol: string(config.Protocol), ProtocolVersion: config.ProtocolVersion,
 			Pid: config.Pid, Test: config.Test,
 			Addr: tfexec.ReattachConfigAddr{Network: config.Addr.Network(), String: config.Addr.String()},
 		},
 	})
+}
+
+func TestCLIClientLifecycleModel(t *testing.T) {
+	f := newServiceFixture(t)
+	cliTestCase(t, f) // Reuse pinned CLI, isolated CLI config and native auth transport.
+	reattach := reattachProvider(t)
 	// Fixed traces retain the known regressions even when the random budget is small.
 	for _, createFirst := range []bool{false, true} {
 		for _, seeded := range []bool{false, true} {
@@ -1382,5 +1398,472 @@ resource "cipherstash_zerokms_client" "app" {
 
 		f.edit(func() { require.Len(t, f.mutations, writes, "retention, adoption or rejection wrote to CipherStash") })
 		check()
+	}
+}
+
+// testPostgres creates a database on the server in CS_TEST_POSTGRES_URL and
+// returns a superuser connection to it plus provider settings that reach it.
+func testPostgres(t *testing.T) (*pgx.Conn, string) {
+	t.Helper()
+
+	admin := postgresAdmin(t)
+	db, drop := createDatabase(t, admin)
+	// t.Context is cancelled before cleanups run, so drop uses its own.
+	t.Cleanup(drop)
+
+	return db, postgresProvider(admin)
+}
+
+// postgresAdmin is the superuser connection in CS_TEST_POSTGRES_URL. Tests
+// without it skip.
+func postgresAdmin(t *testing.T) *pgx.ConnConfig {
+	t.Helper()
+
+	url := os.Getenv("CS_TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("CS_TEST_POSTGRES_URL is not set")
+	}
+
+	admin, err := pgx.ParseConfig(url)
+	require.NoError(t, err)
+
+	return admin
+}
+
+// createDatabase creates a uniquely named database and returns a superuser
+// connection to it and a function that closes the connection and drops the
+// database.
+func createDatabase(t rapid.TB, admin *pgx.ConnConfig) (*pgx.Conn, func()) {
+	t.Helper()
+
+	ctx := context.Background()
+	name := "tf_eql_" + strings.ToLower(rand.Text()[:12])
+	run := func(sql string) {
+		conn, err := pgx.ConnectConfig(ctx, admin)
+		require.NoError(t, err)
+		defer func() { _ = conn.Close(ctx) }()
+
+		_, err = conn.Exec(ctx, sql)
+		require.NoError(t, err)
+	}
+	run("CREATE DATABASE " + name)
+
+	config := admin.Copy()
+	config.Database = name
+	db, err := pgx.ConnectConfig(ctx, config)
+	require.NoError(t, err)
+
+	return db, func() {
+		_ = db.Close(ctx)
+		run("DROP DATABASE " + name + " WITH (FORCE)")
+	}
+}
+
+func postgresProvider(admin *pgx.ConnConfig) string {
+	return fmt.Sprintf(`
+provider "cipherstash" {
+  database = {
+    host     = %q
+    port     = %d
+    username = %q
+    password = %q
+    sslmode  = "disable"
+  }
+}
+`, admin.Host, admin.Port, admin.User, admin.Password)
+}
+
+// createIndexedTable creates a table with EQL-typed columns and the functional
+// index EQL documents for each kind of query, all of which exist in every
+// compiled-in version: equality (hash on eq_term), OPE ordering (btree on
+// ord_term), ORE ordering (btree on ord_term_ore, which needs the ORE operator
+// class) and text match (GIN on match_term).
+func createIndexedTable(t rapid.TB, db *pgx.Conn) {
+	t.Helper()
+
+	_, err := db.Exec(context.Background(), `
+CREATE TABLE encrypted (
+  id         bigint PRIMARY KEY,
+  email      public.eql_v4_text_eq,
+  amount     public.eql_v4_bigint_ord,
+  amount_ore public.eql_v4_bigint_ord_ore,
+  name       public.eql_v4_text_match
+);`+eqlIndexes)
+	require.NoError(t, err)
+}
+
+const eqlIndexes = `
+CREATE INDEX encrypted_email_eq ON encrypted USING hash (eql_v4.eq_term(email));
+CREATE INDEX encrypted_amount_ord ON encrypted USING btree (eql_v4.ord_term(amount));
+CREATE INDEX encrypted_amount_ore ON encrypted USING btree (eql_v4.ord_term_ore(amount_ore));
+CREATE INDEX encrypted_name_match ON encrypted USING gin (eql_v4.match_term(name));`
+
+// handInstall runs a compiled-in installer outside Terraform, as psql -f
+// would, installing EQL or reinstalling it over another version.
+func handInstall(t rapid.TB, db *pgx.Conn, version string) {
+	t.Helper()
+
+	script, err := os.ReadFile(filepath.Join("..", "eql", "bundles", version, "eql-v4-install.sql"))
+	require.NoError(t, err)
+	_, err = db.PgConn().Exec(context.Background(), "SET search_path = public;\n"+string(script)).ReadAll()
+	require.NoError(t, err)
+}
+
+func eqlInstalled(t *testing.T, db *pgx.Conn) bool {
+	t.Helper()
+
+	var installed bool
+	require.NoError(t, db.QueryRow(t.Context(), "SELECT to_regnamespace('eql_v4') IS NOT NULL").Scan(&installed))
+
+	return installed
+}
+
+func TestCLIPostgresEQLLifecycle(t *testing.T) {
+	db, provider := testPostgres(t)
+	version := eql.Versions()[0]
+	digest, _ := eql.SHA256(version)
+	config := provider + fmt.Sprintf("resource \"cipherstash_eql_v4\" \"this\" {\n database = %q\n version = %q\n}\n", db.Config().Database, version)
+	tc := cliTestCase(t, newServiceFixture(t))
+	tc.Steps = []resource.TestStep{
+		{
+			Config: config,
+			ConfigStateChecks: []statecheck.StateCheck{
+				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("version"), knownvalue.StringExact(version)),
+				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("sha256"), knownvalue.StringExact(digest)),
+				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("owner"), knownvalue.StringExact(db.Config().User)),
+				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("ore_available"), knownvalue.Bool(true)),
+				// Without pgcrypto, the installer creates it in a new extensions schema.
+				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("pgcrypto_schema"), knownvalue.StringExact("extensions")),
+			},
+		},
+		{ResourceName: "cipherstash_eql_v4.this", ImportState: true, ImportStateId: db.Config().Database, ImportStateVerify: true},
+		{Config: provider, ExpectError: regexp.MustCompile("EQL is still installed")},
+		{
+			PreConfig: func() {
+				_, err := db.Exec(t.Context(), "DROP SCHEMA eql_v4 CASCADE; DROP SCHEMA eql_v4_internal CASCADE")
+				require.NoError(t, err)
+			},
+			RefreshState:       true,
+			ExpectNonEmptyPlan: true,
+			Check: func(s *terraform.State) error {
+				if _, ok := s.RootModule().Resources["cipherstash_eql_v4.this"]; ok {
+					return fmt.Errorf("refresh kept an installation removed outside Terraform")
+				}
+
+				return nil
+			},
+		},
+		{Config: provider},
+	}
+	resource.UnitTest(t, tc)
+	require.False(t, eqlInstalled(t, db))
+}
+
+func TestCLIPostgresEQLImport(t *testing.T) {
+	db, provider := testPostgres(t)
+	version := eql.Versions()[0]
+	_, err := db.Exec(t.Context(), "CREATE EXTENSION pgcrypto")
+	require.NoError(t, err)
+	handInstall(t, db, version)
+
+	resourceConfig := fmt.Sprintf("resource \"cipherstash_eql_v4\" \"this\" {\n database = %q\n version = %q\n}\n", db.Config().Database, version)
+	tc := cliTestCase(t, newServiceFixture(t))
+	tc.Steps = []resource.TestStep{
+		{
+			Config:           provider + resourceConfig + fmt.Sprintf("import {\n to = cipherstash_eql_v4.this\n id = %q\n}\n", db.Config().Database),
+			ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_eql_v4.this", plancheck.ResourceActionNoop)}},
+			ConfigStateChecks: []statecheck.StateCheck{
+				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("pgcrypto_schema"), knownvalue.StringExact("public")),
+				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("ore_available"), knownvalue.Bool(true)),
+			},
+		},
+		{Config: provider + "removed {\n from = cipherstash_eql_v4.this\n lifecycle {\n destroy = false\n }\n}\n"},
+	}
+	resource.UnitTest(t, tc)
+	require.True(t, eqlInstalled(t, db), "removing the resource from state uninstalled EQL")
+}
+
+// TestCLIPostgresEQLUpgradeModel runs Terraform against a model of one
+// database's EQL installation while its version changes. The provider refuses
+// to change an installed version, so the supported upgrade is: stop managing
+// the installation, reinstall by hand, then import it.
+func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
+	admin := postgresAdmin(t)
+	cliTestCase(t, newServiceFixture(t)) // Pinned CLI and isolated CLI configuration.
+	reattach := reattachProvider(t)
+	versions := eql.Versions()
+	require.GreaterOrEqual(t, len(versions), 2, "no upgrade path to test")
+
+	// Fixed traces cover every upgrade path whatever the random budget: each
+	// installs its first version through Terraform, then for every later
+	// version tries the change in Terraform before upgrading by hand.
+	var paths [][]string
+	for i := range versions {
+		for _, next := range versions[i+1:] {
+			paths = append(paths, []string{versions[i], next})
+		}
+	}
+
+	if len(versions) > 2 {
+		paths = append(paths, versions)
+	}
+
+	for _, path := range paths {
+		t.Run(strings.Join(path, " to "), func(t *testing.T) {
+			m := newEQLUpgradeModel(t, admin, reattach, path[0])
+			defer m.close(t)
+
+			m.apply(t, path[0])
+			m.check(t)
+			for _, next := range path[1:] {
+				for _, step := range []func(){
+					func() { m.apply(t, next) },
+					func() { m.forget(t) },
+					func() { m.handInstall(t, next) },
+					func() { m.importExisting(t) },
+					func() { m.rebuildIndexes(t) },
+					func() { m.apply(t, next) },
+				} {
+					step()
+					m.check(t)
+				}
+			}
+
+			require.True(t, m.managed)
+			require.True(t, m.indexed)
+			require.Equal(t, path[len(path)-1], m.state)
+		})
+	}
+
+	t.Run("generated", func(t *testing.T) {
+		rapid.Check(t, func(r *rapid.T) {
+			version := rapid.SampledFrom(versions)
+			m := newEQLUpgradeModel(r, admin, reattach, version.Draw(r, "configured version"))
+			defer m.close(r)
+
+			r.Repeat(map[string]func(*rapid.T){
+				"apply":        func(r *rapid.T) { m.apply(r, version.Draw(r, "version")) },
+				"hand install": func(r *rapid.T) { m.handInstall(r, version.Draw(r, "version")) },
+				"refresh":      func(r *rapid.T) { m.refresh(r) },
+				"import":       func(r *rapid.T) { m.importExisting(r) },
+				"forget":       func(r *rapid.T) { m.forget(r) },
+				"rebuild indexes": func(r *rapid.T) {
+					if m.installed == "" || m.indexed {
+						r.Skip("no dropped indexes") // Before any draw, so rapid draws another action.
+					}
+
+					m.rebuildIndexes(r)
+				},
+				"": func(r *rapid.T) { m.check(r) },
+			})
+		})
+	})
+}
+
+// eqlUpgradeModel is one database, one Terraform working directory, and what
+// the model predicts for them.
+type eqlUpgradeModel struct {
+	ctx      context.Context //nolint:containedctx // One deadline bounds every command in a trace.
+	cancel   context.CancelFunc
+	tf       *tfexec.Terraform
+	reattach *tfexec.ReattachOption
+	db       *pgx.Conn
+	drop     func()
+	dir      string
+	provider string
+
+	installed string // eql_v4.version(), or empty before any installation
+	managed   bool   // whether Terraform state holds the installation
+	state     string // the version in Terraform state while managed
+	config    string // the version in the resource block
+	table     bool   // whether the EQL-typed table exists
+	indexed   bool   // whether its EQL functional indexes exist
+}
+
+const eqlAddress = "cipherstash_eql_v4.this"
+
+func newEQLUpgradeModel(t rapid.TB, admin *pgx.ConnConfig, reattach *tfexec.ReattachOption, config string) *eqlUpgradeModel {
+	t.Helper()
+
+	dir, err := os.MkdirTemp("", "cipherstash-eql-upgrade-")
+	require.NoError(t, err)
+	binary, err := exec.LookPath("terraform")
+	require.NoError(t, err)
+	tf, err := tfexec.NewTerraform(dir, binary)
+	require.NoError(t, err)
+	db, drop := createDatabase(t, admin)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	m := &eqlUpgradeModel{ctx: ctx, cancel: cancel, tf: tf, reattach: reattach, db: db, drop: drop, dir: dir, provider: postgresProvider(admin), config: config}
+	m.write(t, "")
+	require.NoError(t, tf.Init(ctx, reattach))
+
+	return m
+}
+
+func (m *eqlUpgradeModel) close(t rapid.TB) {
+	m.cancel()
+	m.drop()
+	assert.NoError(t, os.RemoveAll(m.dir))
+}
+
+func (m *eqlUpgradeModel) write(t rapid.TB, block string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(m.dir, "main.tf"), []byte(m.provider+block), 0o600))
+}
+
+func (m *eqlUpgradeModel) writeResource(t rapid.TB) {
+	t.Helper()
+	m.write(t, fmt.Sprintf("resource \"cipherstash_eql_v4\" \"this\" {\n database = %q\n version = %q\n}\n", m.db.Config().Database, m.config))
+}
+
+// apply configures version and applies. Planning refreshes first, so a
+// managed installation's state takes the installed version before the
+// configured version is compared with it.
+func (m *eqlUpgradeModel) apply(t rapid.TB, version string) {
+	t.Helper()
+	m.config = version
+	m.writeResource(t)
+	_, err := m.tf.Plan(m.ctx, m.reattach, tfexec.Out("next.tfplan"))
+	if m.managed && version != m.installed {
+		require.ErrorContains(t, err, "EQL upgrades are not supported")
+
+		return // A failed plan saves nothing, including the refresh.
+	}
+
+	require.NoError(t, err)
+	err = m.tf.Apply(m.ctx, m.reattach, tfexec.DirOrPlan("next.tfplan"))
+	switch {
+	case m.managed:
+		require.NoError(t, err)
+		m.state = m.installed
+	case m.installed != "":
+		require.ErrorContains(t, err, "EQL installation refused") // Create never adopts.
+	default:
+		require.NoError(t, err)
+		m.installed, m.managed, m.state = version, true, version
+		createIndexedTable(t, m.db)
+		m.table, m.indexed = true, true
+	}
+}
+
+func (m *eqlUpgradeModel) handInstall(t rapid.TB, version string) {
+	t.Helper()
+	handInstall(t, m.db, version)
+	if m.installed == "" {
+		createIndexedTable(t, m.db)
+		m.table, m.indexed = true, true
+	} else {
+		// The installer drops both EQL schemas with CASCADE, taking every
+		// index on their functions, even when reinstalling the same version.
+		m.indexed = false
+	}
+
+	m.installed = version
+}
+
+// rebuildIndexes re-creates the indexes a reinstall dropped, the last step of
+// a hand upgrade.
+func (m *eqlUpgradeModel) rebuildIndexes(t rapid.TB) {
+	t.Helper()
+	_, err := m.db.Exec(m.ctx, eqlIndexes)
+	require.NoError(t, err)
+	m.indexed = true
+}
+
+func (m *eqlUpgradeModel) refresh(t rapid.TB) {
+	t.Helper()
+	m.writeResource(t)
+	require.NoError(t, m.tf.Apply(m.ctx, m.reattach, tfexec.RefreshOnly(true)))
+	if m.managed {
+		m.state = m.installed
+	}
+}
+
+func (m *eqlUpgradeModel) importExisting(t rapid.TB) {
+	t.Helper()
+	m.writeResource(t)
+	err := m.tf.Import(m.ctx, eqlAddress, m.db.Config().Database, m.reattach)
+	switch {
+	case m.managed:
+		require.ErrorContains(t, err, "Resource already managed")
+	case m.installed == "":
+		require.ErrorContains(t, err, "EQL is not installed")
+	default:
+		require.NoError(t, err)
+		m.managed, m.state = true, m.installed
+	}
+}
+
+// forget stops managing the installation without changing the database.
+func (m *eqlUpgradeModel) forget(t rapid.TB) {
+	t.Helper()
+	m.write(t, "removed {\n from = "+eqlAddress+"\n lifecycle {\n destroy = false\n }\n}\n")
+	require.NoError(t, m.tf.Apply(m.ctx, m.reattach))
+	m.managed, m.state = false, ""
+}
+
+func (m *eqlUpgradeModel) check(t rapid.TB) {
+	t.Helper()
+
+	installed := ""
+	var exists bool
+	require.NoError(t, m.db.QueryRow(m.ctx, "SELECT to_regnamespace('eql_v4') IS NOT NULL").Scan(&exists))
+	if exists {
+		require.NoError(t, m.db.QueryRow(m.ctx, "SELECT eql_v4.version()").Scan(&installed))
+	}
+
+	require.Equal(t, m.installed, installed, "installed version differs from the model")
+
+	// Terraform never touches user tables or indexes; only a reinstall drops
+	// the indexes. Index operator classes come from pg_index, because
+	// pg_get_indexdef omits a default one, such as record_ops bound in place of
+	// the ORE operator class.
+	rows, err := m.db.Query(m.ctx, `
+SELECT 'column ' || a.attname || ' ' || format_type(a.atttypid, a.atttypmod)
+FROM pg_attribute a
+WHERE a.attrelid = to_regclass('public.encrypted') AND a.attnum > 0 AND NOT a.attisdropped
+UNION ALL
+SELECT 'index ' || i.relname || ' ' || am.amname || ' ' || oc.opcname
+FROM pg_index x
+JOIN pg_class i ON i.oid = x.indexrelid
+JOIN pg_am am ON am.oid = i.relam
+JOIN pg_opclass oc ON oc.oid = x.indclass[0]
+WHERE x.indrelid = to_regclass('public.encrypted')`)
+	require.NoError(t, err)
+	objects, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	var want []string
+	if m.table {
+		want = append(want, "column id bigint", "column email eql_v4_text_eq", "column amount eql_v4_bigint_ord",
+			"column amount_ore eql_v4_bigint_ord_ore", "column name eql_v4_text_match", "index encrypted_pkey btree int8_ops")
+	}
+
+	if m.indexed {
+		want = append(want, "index encrypted_email_eq hash text_ops", "index encrypted_amount_ord btree bytea_ops",
+			"index encrypted_amount_ore btree ore_block_v2_operator_class", "index encrypted_name_match gin array_ops")
+	}
+
+	require.ElementsMatch(t, want, objects, "table or indexes differ from the model")
+
+	s, err := m.tf.Show(m.ctx, m.reattach)
+	require.NoError(t, err)
+	if !m.managed {
+		require.True(t, s.Values == nil || len(s.Values.RootModule.Resources) == 0, "Terraform manages an installation the model does not")
+
+		return
+	}
+
+	require.NotNil(t, s.Values)
+	require.Len(t, s.Values.RootModule.Resources, 1)
+	attributes := s.Values.RootModule.Resources[0].AttributeValues
+	require.Equal(t, m.db.Config().Database, attributes["id"])
+	require.Equal(t, m.state, attributes["version"], "state version differs from the model")
+	require.Equal(t, true, attributes["ore_available"])
+
+	if m.config == m.state && m.state == m.installed {
+		m.writeResource(t)
+		changes, err := m.tf.Plan(m.ctx, m.reattach)
+		require.NoError(t, err)
+		require.False(t, changes, "an up-to-date installation plans changes")
 	}
 }

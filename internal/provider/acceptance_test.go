@@ -34,7 +34,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 	var schema frameworkprovider.SchemaResponse
 	p.Schema(context.Background(), frameworkprovider.SchemaRequest{}, &schema)
 	config := tfsdk.State{Schema: schema.Schema}
-	noErrors(t, config.Set(context.Background(), providerModel{CRN: types.StringValue(crn), AccessKey: types.StringNull()}))
+	noErrors(t, config.Set(context.Background(), authConfig(types.StringValue(crn), types.StringNull())))
 	var configured frameworkprovider.ConfigureResponse
 	p.Configure(context.Background(), frameworkprovider.ConfigureRequest{Config: tfsdk.Config{Schema: schema.Schema, Raw: config.Raw}}, &configured)
 	noErrors(t, configured.Diagnostics)
@@ -89,7 +89,9 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 	t.Logf("test-owned actor/client names in %s: %s and %s-v2", crn, name, name)
 	configuration := func(suffix, kind, role string) string {
 		return fmt.Sprintf(`
-provider "cipherstash" { workspace_crn = %q }
+provider "cipherstash" {
+  auth = { workspace_crn = %q }
+}
 resource "cipherstash_cts_actor" "test" {
   name = %q
   kind = %q
