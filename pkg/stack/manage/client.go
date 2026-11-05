@@ -20,6 +20,7 @@ import (
 
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth"
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/cts"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/ctsurl"
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/useragent"
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/zerokms"
 )
@@ -87,6 +88,7 @@ type ClientOption func(*clientOptions)
 
 type clientOptions struct {
 	transport http.RoundTripper
+	ctsURL    *url.URL
 }
 
 // WithTransport sets the transport for administration requests. It does not
@@ -95,6 +97,14 @@ type clientOptions struct {
 // http.DefaultTransport.
 func WithTransport(transport http.RoundTripper) ClientOption {
 	return func(o *clientOptions) { o.transport = transport }
+}
+
+// WithCTSURL sends CTS administration requests to ctsURL instead of the
+// workspace region's CTS. It must be an HTTPS URL, or HTTP to a loopback host,
+// without credentials, query or fragment. Pass the same URL to
+// auth.WithCTSURL.
+func WithCTSURL(ctsURL *url.URL) ClientOption {
+	return func(o *clientOptions) { o.ctsURL = ctsURL }
 }
 
 // NewClient makes no network request. tokens must come from
@@ -118,12 +128,20 @@ func NewClient(crn auth.CRN, tokens oauth2.TokenSource, opts ...ClientOption) (*
 		return nil, fmt.Errorf("%w: transport is required", ErrConfig)
 	}
 
+	ctsURL := crn.CTSURL()
+	if options.ctsURL != nil {
+		var err error
+		if ctsURL, err = ctsurl.Override(options.ctsURL); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrConfig, err)
+		}
+	}
+
 	httpClient := &http.Client{
 		Transport:     options.transport,
 		Timeout:       requestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	ctsClient, err := cts.NewClientWithResponses(crn.CTSURL(),
+	ctsClient, err := cts.NewClientWithResponses(ctsURL,
 		cts.WithHTTPClient(httpClient),
 		cts.WithRequestEditorFn(func(ctx context.Context, req *http.Request) error {
 			if _, err := authorize(ctx, tokens, req); err != nil {

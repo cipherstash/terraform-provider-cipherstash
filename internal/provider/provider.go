@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 
@@ -88,7 +89,7 @@ func (p *Provider) Schema(_ context.Context, _ provider.SchemaRequest, resp *pro
 		Attributes: map[string]schema.Attribute{
 			"auth": schema.SingleNestedAttribute{
 				Optional:    true,
-				Description: "Connection to a CipherStash workspace. Every CipherStash resource and data source requires it. Set it to `{}` to take both values from the environment. When it is omitted, the provider never reads `CS_WORKSPACE_CRN` or `CS_CLIENT_ACCESS_KEY` and never contacts CipherStash.",
+				Description: "Connection to a CipherStash workspace. Every CipherStash resource and data source requires it. Set it to `{}` to take both values from the environment. When it is omitted, the provider never reads `CS_WORKSPACE_CRN`, `CS_CLIENT_ACCESS_KEY` or `CS_CTS_HOST` and never contacts CipherStash. When `CS_CTS_HOST` is set, as in CipherStash's SDKs, the provider sends the access key and management requests to that CipherStash Token Service instead of the workspace region's, and requires it to have issued the tokens. It must be an HTTPS URL, or HTTP to a loopback host, without credentials, query or fragment; an empty value is ignored.",
 				Attributes: map[string]schema.Attribute{
 					"workspace_crn":     schema.StringAttribute{Optional: true, Description: "CipherStash Resource Name (CRN) of the workspace, in the format `crn:<region>.aws:<workspace ID>`. Omit this argument or set it to null to use `CS_WORKSPACE_CRN`. Explicit known values override the environment. Empty, unknown or malformed selected values are rejected without fallback; no saved profile is read."},
 					"client_access_key": schema.StringAttribute{Optional: true, Sensitive: true, Description: "Access key with the Admin role for this workspace. Omit this argument or set it to null to use `CS_CLIENT_ACCESS_KEY`. Explicit known values override the environment. Empty, unknown or malformed selected values are rejected without fallback. `CS_ACCESS_KEY`, `CS_CONTROL_ACCESS_KEY` and `CIPHERSTASH_ACCESS_KEY` are ignored. Native authentication verifies the token's signature, issuer, audience, expiry, workspace and Admin role before using it. Credentials without Admin, including Control-only and Member-only credentials, are rejected. CipherStash services authorize each request."},
@@ -201,6 +202,22 @@ func (p *Provider) configureAuth(ctx context.Context, cfg authModel, diags *diag
 		return nil
 	}
 
+	// CS_CTS_HOST replaces the workspace region's CTS, as in CipherStash's SDKs.
+	// An empty value is unset; a malformed one fails rather than falling back.
+	var authOptions []auth.Option
+	var manageOptions []manage.ClientOption
+	if host := os.Getenv("CS_CTS_HOST"); host != "" {
+		ctsURL, err := url.Parse(host)
+		if err != nil {
+			diags.AddError("Invalid CTS host", invalidCTSHost)
+
+			return nil
+		}
+
+		authOptions = append(authOptions, auth.WithCTSURL(ctsURL))
+		manageOptions = append(manageOptions, manage.WithCTSURL(ctsURL))
+	}
+
 	// Token refresh outlives Configure, but the initial exchange must still
 	// honour cancellation of this request. StopProvider cancels subsequent
 	// resource requests through the framework and this authentication lifetime.
@@ -208,7 +225,15 @@ func (p *Provider) configureAuth(ctx context.Context, cfg authModel, diags *diag
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
 
-	tokens, err := auth.NewTokenSource(lifetime, clientConfig.WorkspaceCRN, clientConfig.ClientAccessKey)
+	tokens, err := auth.NewTokenSource(lifetime, clientConfig.WorkspaceCRN, clientConfig.ClientAccessKey, authOptions...)
+	if errors.Is(err, auth.ErrConfig) && authOptions != nil {
+		// The CRN and key are already valid, so the override was rejected.
+		cancel()
+		diags.AddError("Invalid CTS host", invalidCTSHost)
+
+		return nil
+	}
+
 	if err == nil {
 		_, err = tokens.Token()
 	}
@@ -220,7 +245,7 @@ func (p *Provider) configureAuth(ctx context.Context, cfg authModel, diags *diag
 		return nil
 	}
 
-	client, err := manage.NewClient(clientConfig.WorkspaceCRN, tokens)
+	client, err := manage.NewClient(clientConfig.WorkspaceCRN, tokens, manageOptions...)
 	if err != nil {
 		cancel()
 		diags.AddError("Cannot configure CipherStash client", "Could not initialize the service client for the configured workspace.")
@@ -299,6 +324,8 @@ type eqlDatabase interface {
 	InspectEQL(ctx context.Context, database string) (eql.Installation, error)
 	InstallEQL(ctx context.Context, database, version string, requireORE bool) error
 }
+
+const invalidCTSHost = "CS_CTS_HOST must be an HTTPS URL, or HTTP to a loopback host such as http://localhost:3001, without credentials, query or fragment. Unset it to use the workspace region's CipherStash Token Service."
 
 var (
 	errNoAuth     = errors.New("provider auth settings are not configured")

@@ -51,6 +51,7 @@ func cliTestCase(t *testing.T, f *serviceFixture) resource.TestCase {
 	binary, err := exec.LookPath("terraform")
 	require.NoError(t, err, "Terraform 1.14.6 is required; run through mise")
 	t.Setenv("CHECKPOINT_DISABLE", "1")
+	t.Setenv("CS_CTS_HOST", "")
 	tf, err := tfexec.NewTerraform(t.TempDir(), binary)
 	require.NoError(t, err)
 	version, _, err := tf.Version(t.Context(), false)

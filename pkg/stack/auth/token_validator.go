@@ -21,8 +21,8 @@ type tokenValidator struct {
 	jwtValidator *validator.Validator
 }
 
-func newTokenValidator(crn CRN, requiredRole string, httpClient *http.Client) (*tokenValidator, error) {
-	issuer, err := url.Parse(crn.CTSURL())
+func newTokenValidator(crn CRN, ctsURL, requiredRole string, httpClient *http.Client) (*tokenValidator, error) {
+	issuer, err := url.Parse(ctsURL)
 	if err != nil {
 		return nil, err
 	}

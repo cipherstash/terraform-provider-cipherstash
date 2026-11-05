@@ -187,6 +187,56 @@ func TestProviderCredentialPrecedence(t *testing.T) {
 	}
 }
 
+func TestProviderCTSHost(t *testing.T) {
+	t.Setenv("CS_WORKSPACE_CRN", testCRN)
+	t.Setenv("CS_CLIENT_ACCESS_KEY", "CSAKtestKeyId.testKeySecret")
+	for _, tc := range []struct{ name, host, issuer string }{
+		{"empty uses the region", "", testIssuer},
+		{"https override", "https://cts.staging.example", "https://cts.staging.example/"},
+		{"http to loopback", "http://localhost:3001", "http://localhost:3001/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CS_CTS_HOST", tc.host)
+			f := newServiceFixture(t)
+			// The fixture accepts CTS requests only at the issuer's host.
+			base := fixtureTransport(t, "admin", f.ServeHTTP, func(claims map[string]any) { claims["iss"] = tc.issuer })
+			var ctsRequests []string
+			rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Host != "ap-southeast-2.aws.viturhosted.net" {
+					ctsRequests = append(ctsRequests, req.URL.String())
+				}
+
+				return base.RoundTrip(req)
+			})
+			p := New()
+			t.Cleanup(p.Close)
+			configured := configureFixture(t, p, rt, authConfig(types.StringNull(), types.StringNull()))
+			noErrors(t, configured.Diagnostics)
+			client, err := clientFromProviderData(configured.ResourceData)
+			require.NoError(t, err)
+			_, err = client.ListCTSActors(t.Context(), manage.ListCTSActorsOptions{})
+			require.NoError(t, err)
+
+			require.Equal(t, []string{tc.issuer + "api/authorise", tc.issuer + ".well-known/jwks.json", tc.issuer + "api/actors"}, ctsRequests)
+		})
+	}
+
+	for _, host := range []string{"http://cts.staging.example", "cts.staging.example", "https://user:secret@cts.staging.example", "https://cts.staging.example/?secret=1", "https://cts.staging.example/#secret", "https://[::1"} {
+		t.Run("rejects "+host, func(t *testing.T) {
+			t.Setenv("CS_CTS_HOST", host)
+			p := New()
+			t.Cleanup(p.Close)
+			resp := configureFixture(t, p, roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("invalid CS_CTS_HOST was contacted")
+				return nil, http.ErrNotSupported
+			}), authConfig(types.StringNull(), types.StringNull()))
+			require.True(t, resp.Diagnostics.HasError())
+			require.Equal(t, "Invalid CTS host", resp.Diagnostics[0].Summary())
+			require.NotContains(t, resp.Diagnostics[0].Detail(), "secret")
+		})
+	}
+}
+
 func TestProviderInstancesKeepSeparateAuthentication(t *testing.T) {
 	f := newServiceFixture(t)
 	f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "application"}}

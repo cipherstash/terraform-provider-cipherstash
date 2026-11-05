@@ -24,6 +24,7 @@ import (
 	"github.com/lestrrat-go/jwx/v3/jwk"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/cts"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/ctsurl"
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/internal/useragent"
 )
 
@@ -48,6 +49,7 @@ type Option func(*options)
 
 type options struct {
 	transport http.RoundTripper
+	ctsURL    *url.URL
 }
 
 // WithTransport sets the transport for CTS exchanges and signing-key requests.
@@ -55,6 +57,14 @@ type options struct {
 // and a no-redirect policy. The default is http.DefaultTransport.
 func WithTransport(transport http.RoundTripper) Option {
 	return func(o *options) { o.transport = transport }
+}
+
+// WithCTSURL sends CTS exchanges and signing-key requests to ctsURL instead of
+// the workspace region's CTS, and requires tokens to name it as their issuer.
+// It must be an HTTPS URL, or HTTP to a loopback host, without credentials,
+// query or fragment. Pass the same URL to manage.WithCTSURL.
+func WithCTSURL(ctsURL *url.URL) Option {
+	return func(o *options) { o.ctsURL = ctsURL }
 }
 
 // NewTokenSource validates its configuration without contacting CTS. The key's
@@ -91,17 +101,25 @@ func NewTokenSource(ctx context.Context, crn CRN, key AccessKey, opts ...Option)
 		return nil, fmt.Errorf("%w: transport is required", ErrConfig)
 	}
 
+	ctsURL := crn.CTSURL()
+	if options.ctsURL != nil {
+		var err error
+		if ctsURL, err = ctsurl.Override(options.ctsURL); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrConfig, err)
+		}
+	}
+
 	httpClient := &http.Client{
 		Transport:     userAgentTransport{next: options.transport},
 		Timeout:       requestTimeout,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	validator, err := newTokenValidator(crn, key.requiredRole(), httpClient)
+	validator, err := newTokenValidator(crn, ctsURL, key.requiredRole(), httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 
-	client, err := cts.NewClientWithResponses(crn.CTSURL(), cts.WithHTTPClient(httpClient))
+	client, err := cts.NewClientWithResponses(ctsURL, cts.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}

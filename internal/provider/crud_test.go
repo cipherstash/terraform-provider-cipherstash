@@ -94,8 +94,13 @@ func fixtureTransport(t *testing.T, role string, handler http.HandlerFunc, chang
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	t.Cleanup(transport.CloseIdleConnections)
 
+	// CTS is wherever the token says it was issued, so changing the issuer
+	// moves every CTS request, and requests to the region's CTS then fail.
+	issuer, err := url.Parse(claims["iss"].(string))
+	require.NoError(t, err)
+
 	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Host != "ap-southeast-2.aws.cts.cipherstashmanaged.net" && req.URL.Host != "ap-southeast-2.aws.viturhosted.net" {
+		if req.URL.Host != issuer.Host && req.URL.Host != "ap-southeast-2.aws.viturhosted.net" {
 			assert.Failf(t, "unexpected fixture destination", "%s", req.URL.Host)
 			return nil, fmt.Errorf("unexpected fixture destination")
 		}

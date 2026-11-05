@@ -28,7 +28,7 @@ Neither the provider nor manage.Config reads CS_CLIENT_ID: it identifies an appl
 
 ### Optional
 
-- `auth` (Attributes) Connection to a CipherStash workspace. Every CipherStash resource and data source requires it. Set it to `{}` to take both values from the environment. When it is omitted, the provider never reads `CS_WORKSPACE_CRN` or `CS_CLIENT_ACCESS_KEY` and never contacts CipherStash. (see [below for nested schema](#nestedatt--auth))
+- `auth` (Attributes) Connection to a CipherStash workspace. Every CipherStash resource and data source requires it. Set it to `{}` to take both values from the environment. When it is omitted, the provider never reads `CS_WORKSPACE_CRN`, `CS_CLIENT_ACCESS_KEY` or `CS_CTS_HOST` and never contacts CipherStash. When `CS_CTS_HOST` is set, as in CipherStash's SDKs, the provider sends the access key and management requests to that CipherStash Token Service instead of the workspace region's, and requires it to have issued the tokens. It must be an HTTPS URL, or HTTP to a loopback host, without credentials, query or fragment; an empty value is ignored. (see [below for nested schema](#nestedatt--auth))
 - `database` (Attributes) Connection to a PostgreSQL server. `cipherstash_eql_v4` requires it and names the database to use. Unset arguments fall back to the libpq environment variables `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGSSLMODE` and `PGSSLROOTCERT`, and to the password file. Connect as a role that can create the ORE operator class: a superuser, or `rds_superuser` on Amazon RDS and Aurora. The connection opens only when a resource needs it, so these values may be unknown during planning. (see [below for nested schema](#nestedatt--database))
 
 <a id="nestedatt--auth"></a>
