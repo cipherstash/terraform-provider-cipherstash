@@ -342,6 +342,10 @@ func TestPostgresUninstall(t *testing.T) {
 			clean := snapshot(t, database)
 
 			require.NoError(t, Install(t.Context(), conn, installed, true))
+			// Grants, including default privileges, go with the schemas.
+			app := testRole(t, database).User
+			exec(t, conn, "GRANT USAGE ON SCHEMA eql_v4, eql_v4_internal TO "+app)
+			exec(t, conn, "ALTER DEFAULT PRIVILEGES IN SCHEMA eql_v4 GRANT EXECUTE ON FUNCTIONS TO "+app)
 			require.NoError(t, Uninstall(t.Context(), conn))
 			// Beyond the uninstaller's schemas, this removes the domains and
 			// functions it leaves in public.

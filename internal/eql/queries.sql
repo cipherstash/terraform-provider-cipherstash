@@ -77,7 +77,9 @@ ORDER BY 1;
 -- such as a view's rule, to the whole object, and names whole objects only. It
 -- ignores what the installer itself creates outside the schemas: operators
 -- whose function is in an EQL schema, and the eql_ore_unavailable constraints
--- it adds to the domains in public without the ORE operator class.
+-- it adds to the domains in public without the ORE operator class. It also
+-- ignores default privileges in the schemas, which are grants rather than
+-- objects that use EQL.
 WITH RECURSIVE eql AS (
   SELECT oid FROM pg_catalog.pg_namespace WHERE nspname IN ('eql_v4', 'eql_v4_internal')
 ), dependents(classid, objid, objsubid) AS (
@@ -108,6 +110,7 @@ SELECT DISTINCT pg_describe_object(x.classid, x.objid, x.objsubid)::text
 FROM located x
 WHERE NOT EXISTS (SELECT FROM eql WHERE eql.oid = x.namespace)
   AND x.namespace IS DISTINCT FROM 'pg_toast'::regnamespace
+  AND x.classid <> 'pg_default_acl'::regclass
   AND NOT (x.classid = 'pg_operator'::regclass AND EXISTS (
     SELECT FROM pg_catalog.pg_operator o JOIN pg_catalog.pg_proc p ON p.oid = o.oprcode
     WHERE o.oid = x.objid AND p.pronamespace IN (SELECT oid FROM eql)))
