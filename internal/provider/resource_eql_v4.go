@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/internal/eql"
@@ -44,15 +45,13 @@ type eqlModel struct {
 	PgcryptoSchema types.String `tfsdk:"pgcrypto_schema"`
 }
 
-const uninstallGuidance = "This provider does not uninstall EQL: uninstalling would break every column typed with an EQL domain, and the domains in schema public would remain. To stop managing the installation without changing the database, replace the resource with a removed block that sets lifecycle { destroy = false }, or run terraform state rm."
-
 func (r *eqlResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_eql_v4"
 }
 
 func (r *eqlResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Install CipherStash EQL v4, the PostgreSQL types and functions that store, compare and index encrypted values, into one database. The provider's `database` settings choose the server and role; the role that installs EQL owns every EQL object.\n\nThe provider contains the installer for each supported version: the `eql-v4-install.sql` asset of the matching cipherstash/stack Go release, checked against its SHA-256. Create runs it in one transaction with `search_path = public`, under the same advisory lock as the `stash` CLI's installer. It refuses, changing nothing, if the database already has an `eql_v4` or `eql_v4_internal` schema (import it instead), if `pgcrypto` is installed in a schema other than `public` or `extensions`, or if the role lacks `CREATE` on the database or on `public`. After the installer runs, it rolls back unless `eql_v4.version()` matches and, when `require_ore` is true, the ORE operator class exists.\n\nInstall `pgcrypto` before EQL, for example with a `postgresql_extension` resource that this resource depends on. Otherwise the installer creates it in a new `extensions` schema, and every role that compares ORE-encrypted values also needs `USAGE` on that schema.\n\nEQL issues no grants. Roles that query encrypted columns need `USAGE` on both `schema` and `internal_schema`; grant it with another provider, such as `postgresql_grant`, referencing these attributes so Terraform installs EQL first.\n\nThe provider cannot upgrade EQL yet: changing `version` is rejected. The installer drops and re-creates both schemas, removing every grant and every index built on EQL functions. To upgrade by hand, remove the resource from state, run the new version's installer, import the installation with the new `version`, then restore grants and re-create indexes; the README describes each step. Destroy does not uninstall EQL; it fails while EQL is installed and succeeds once it is gone.",
+		Description: "Install CipherStash EQL v4, the PostgreSQL types and functions that store, compare and index encrypted values, into one database. The provider's `database` settings choose the server and role; the role that installs EQL owns every EQL object.\n\nThe provider contains the installer for each supported version: the `eql-v4-install.sql` asset of the matching cipherstash/stack Go release, checked against its SHA-256. Create runs it in one transaction with `search_path = public`, under the same advisory lock as the `stash` CLI's installer. It refuses, changing nothing, if the database already has an `eql_v4` or `eql_v4_internal` schema (import it instead), if `pgcrypto` is installed in a schema other than `public` or `extensions`, or if the role lacks `CREATE` on the database or on `public`. After the installer runs, it rolls back unless `eql_v4.version()` matches and, when `require_ore` is true, the ORE operator class exists.\n\nInstall `pgcrypto` before EQL, for example with a `postgresql_extension` resource that this resource depends on. Otherwise the installer creates it in a new `extensions` schema, and every role that compares ORE-encrypted values also needs `USAGE` on that schema.\n\nEQL issues no grants. Roles that query encrypted columns need `USAGE` on both `schema` and `internal_schema`; grant it with another provider, such as `postgresql_grant`, referencing these attributes so Terraform installs EQL first.\n\nThe provider cannot upgrade EQL yet: changing `version` is rejected. The installer drops and re-creates both schemas, removing every grant and every index built on EQL functions. To upgrade by hand, remove the resource from state, run the new version's installer, import the installation with the new `version`, then restore grants and re-create indexes; the README describes each step.\n\nDestroy uninstalls EQL in one transaction under the same lock. It refuses, changing nothing, while any column uses a `public.eql_v4_*` domain, while any object outside EQL depends on it (such as an index or view that calls an EQL function), if the role lacks the privileges of the owner of the EQL schemas or of the domains and functions EQL adds to `public`, or if the provider has no uninstaller for the version the database reports, which planning already rejects, before Terraform destroys anything else. Otherwise it runs that release's `eql-v4-uninstall.sql`, which drops both schemas, then drops the domains and functions it leaves in `public`, without CASCADE. `pgcrypto` and the `extensions` schema stay. To stop managing the installation without changing the database, use a `removed` block that sets `lifecycle { destroy = false }`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed:      true,
@@ -61,7 +60,7 @@ func (r *eqlResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			},
 			"database": schema.StringAttribute{
 				Required:      true,
-				Description:   "Name of the database to install EQL into, on the server from the provider's `database` settings. Changing this value replaces the resource. Because destroy refuses while EQL is installed, remove the old installation from state first.",
+				Description:   "Name of the database to install EQL into, on the server from the provider's `database` settings. Changing this value replaces the resource: destroy uninstalls EQL from the old database, under the same refusals as any destroy, and create installs it in the new one.",
 				Validators:    []validator.String{stringvalidator.LengthAtLeast(1)},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
@@ -120,27 +119,35 @@ func (r *eqlResource) Configure(_ context.Context, req resource.ConfigureRequest
 }
 
 func (r *eqlResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.Plan.Raw.IsNull() {
-		return
-	}
-
-	var plan eqlModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() || plan.Version.IsUnknown() {
-		return
+	var plan, state eqlModel
+	if !req.Plan.Raw.IsNull() {
+		resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	}
 
 	if !req.State.Raw.IsNull() {
-		var state eqlModel
 		resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
+	}
 
-		if !plan.Version.Equal(state.Version) {
-			resp.Diagnostics.AddAttributeError(path.Root("version"), "EQL upgrades are not supported", "The database has EQL "+state.Version.ValueString()+" and the configuration asks for "+plan.Version.ValueString()+". This provider cannot upgrade EQL yet: the installer drops and re-creates both EQL schemas, removing every grant and every index built on EQL functions. Set version to the installed version, or upgrade by hand as the README describes.")
-			return
-		}
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Destroy, including the destroy half of a replacement, uninstalls the
+	// version in state, which refresh has just read from the database. Refuse
+	// now rather than after Terraform has destroyed the resources that depend
+	// on this one. Delete checks the database again.
+	if !req.State.Raw.IsNull() && (req.Plan.Raw.IsNull() || !plan.Database.Equal(state.Database)) && !eql.Uninstallable(state.Version.ValueString()) {
+		resp.Diagnostics.AddError("EQL uninstall refused", noUninstaller(state.Version.ValueString()))
+		return
+	}
+
+	if req.Plan.Raw.IsNull() || plan.Version.IsUnknown() {
+		return
+	}
+
+	if !req.State.Raw.IsNull() && !plan.Version.Equal(state.Version) {
+		resp.Diagnostics.AddAttributeError(path.Root("version"), "EQL upgrades are not supported", "The database has EQL "+state.Version.ValueString()+" and the configuration asks for "+plan.Version.ValueString()+". This provider cannot upgrade EQL yet: the installer drops and re-creates both EQL schemas, removing every grant and every index built on EQL functions. Set version to the installed version, or upgrade by hand as the README describes.")
+		return
 	}
 
 	if digest, ok := eql.SHA256(plan.Version.ValueString()); ok {
@@ -239,14 +246,31 @@ func (r *eqlResource) Delete(ctx context.Context, req resource.DeleteRequest, re
 		return
 	}
 
-	installation, err := r.database.InspectEQL(ctx, state.Database.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Cannot inspect EQL installation", databaseError(err)+" State is retained because the installation's absence could not be confirmed.")
+	database := state.Database.ValueString()
+	uninstallErr := r.database.UninstallEQL(ctx, database)
+	switch {
+	case uninstallErr == nil:
+		return
+	case errors.Is(uninstallErr, eql.ErrNoUninstaller):
+		// Planning checked the version in state, so EQL changed since.
+		resp.Diagnostics.AddError("EQL uninstall refused", "EQL in the database changed after planning from "+state.Version.ValueString()+" to a version this provider has no uninstaller for; it ships those for "+strings.Join(eql.Versions(), ", ")+". Refresh and review the plan.")
+		return
+	case eql.Refused(uninstallErr):
+		resp.Diagnostics.AddError("EQL uninstall refused", refusal(uninstallErr))
+		return
+	case !errors.Is(uninstallErr, eql.ErrCommitUnknown):
+		resp.Diagnostics.AddError("Cannot uninstall EQL", databaseError(uninstallErr)+" The transaction rolled back, so the database is unchanged.")
 		return
 	}
 
-	if installation.Installed {
-		resp.Diagnostics.AddError("EQL is still installed", uninstallGuidance)
+	installation, readErr := r.database.InspectEQL(ctx, database)
+	switch {
+	case readErr != nil:
+		resp.Diagnostics.AddError("Cannot confirm EQL uninstall", "The connection failed while committing the uninstall, and reading the database afterwards also failed: "+databaseError(readErr)+" The installation is retained in state; inspect the database before the next apply.")
+	case installation.Installed:
+		resp.Diagnostics.AddError("Cannot uninstall EQL", "The connection failed while committing the uninstall, and EQL is still installed, so it did not commit. Retry the apply.")
+	default:
+		resp.Diagnostics.AddWarning("EQL uninstall confirmed after a commit error", "The connection failed while committing the uninstall, but a fresh connection confirms EQL is no longer installed.")
 	}
 }
 
@@ -295,13 +319,26 @@ func applyInstallation(model eqlModel, installation eql.Installation) eqlModel {
 	return model
 }
 
+// noUninstaller explains why the provider cannot uninstall EQL version.
+func noUninstaller(version string) string {
+	return "The database reports EQL " + version + ", and this provider has no uninstaller for it; it ships those for " + strings.Join(eql.Versions(), ", ") + ". Uninstall with a provider version that has it, or stop managing the installation without changing the database with a removed block that sets lifecycle { destroy = false }."
+}
+
 // refusal explains an eql.Refused error. Each one changed nothing.
 func refusal(err error) string {
+	named := ""
+	if objects, ok := errors.AsType[*eql.ObjectsError](err); ok {
+		named = strings.Join(objects.Names, ", ")
+		if more := objects.Total - len(objects.Names); more > 0 {
+			named += " and " + strconv.Itoa(more) + " more"
+		}
+	}
+
 	switch {
 	case errors.Is(err, eql.ErrAlreadyInstalled):
 		return "The database already has an eql_v4 or eql_v4_internal schema. Import the existing installation with its database name instead; installing again would drop both schemas and every grant and index that depends on them."
 	case errors.Is(err, eql.ErrLocked):
-		return "Another EQL installation, from this provider or the stash CLI, holds the lifecycle lock on this database. Retry when it has finished."
+		return "Another EQL installation or uninstall, from this provider or the stash CLI, holds the lifecycle lock on this database. Retry when it has finished."
 	case errors.Is(err, eql.ErrPgcryptoSchema):
 		return "The pgcrypto extension is installed in a schema other than public or extensions, where EQL cannot find it. Move it with ALTER EXTENSION pgcrypto SET SCHEMA public, then retry."
 	case errors.Is(err, eql.ErrPrivilege):
@@ -310,6 +347,14 @@ func refusal(err error) string {
 		return "The installer could not create the ORE operator class, which needs a superuser or Amazon RDS rds_superuser, so the installation rolled back. Connect as such a role, or set require_ore = false to install with the ORE-backed domains disabled."
 	case errors.Is(err, eql.ErrVersionMismatch):
 		return "After running the installer, the database did not report the expected EQL version, so the installation rolled back. This is a provider bug."
+	case errors.Is(err, eql.ErrNotOwner):
+		return "The database role lacks the privileges of the owner of these EQL objects, which uninstalling drops: " + named + ". Connect as their owner or a member of it."
+	case errors.Is(err, eql.ErrInUse):
+		return "These columns use EQL domains: " + named + ". Without EQL they would reject writes or compare whole ciphertexts. Drop them or convert them to other types, then retry."
+	case errors.Is(err, eql.ErrDependents):
+		return "Uninstalling EQL would drop these objects, which depend on it: " + named + ". Remove them, then retry."
+	case errors.Is(err, eql.ErrUninstallIncomplete):
+		return "After running the uninstaller, EQL objects remained in the database, so the uninstall rolled back. This is a provider bug."
 	default:
 		return "No installer for this version is compiled into the provider. This is a provider bug: planning validates the version."
 	}

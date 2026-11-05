@@ -323,6 +323,7 @@ type manageClient interface {
 type eqlDatabase interface {
 	InspectEQL(ctx context.Context, database string) (eql.Installation, error)
 	InstallEQL(ctx context.Context, database, version string, requireORE bool) error
+	UninstallEQL(ctx context.Context, database string) error
 }
 
 const invalidCTSHost = "CS_CTS_HOST must be an HTTPS URL, or HTTP to a loopback host such as http://localhost:3001, without credentials, query or fragment. Unset it to use the workspace region's CipherStash Token Service."

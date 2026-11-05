@@ -952,15 +952,52 @@ func eqlInstalled(t *testing.T, db *pgx.Conn) bool {
 	return installed
 }
 
+// eqlLeftovers counts the EQL domains and functions in schema public, which
+// the upstream uninstaller leaves behind.
+func eqlLeftovers(ctx context.Context, t rapid.TB, db *pgx.Conn) int {
+	t.Helper()
+
+	var count int
+	require.NoError(t, db.QueryRow(ctx, `
+SELECT (SELECT count(*) FROM pg_type WHERE typnamespace = 'public'::regnamespace AND typname LIKE 'eql\_v4\_%')
+     + (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname LIKE 'eql\_v4\_%')`).Scan(&count))
+
+	return count
+}
+
 func TestCLIPostgresEQLLifecycle(t *testing.T) {
 	db, provider := testPostgres(t)
+	other, dropOther := createDatabase(t, postgresAdmin(t))
+	t.Cleanup(dropOther)
 	version := eql.Versions()[0]
 	digest, _ := eql.SHA256(version)
-	config := provider + fmt.Sprintf("resource \"cipherstash_eql_v4\" \"this\" {\n database = %q\n version = %q\n}\n", db.Config().Database, version)
+	sql := func(db *pgx.Conn, statement string) func() {
+		return func() {
+			_, err := db.Exec(t.Context(), statement)
+			require.NoError(t, err)
+		}
+	}
+	// The marker stands in for a grant, which Terraform destroys before EQL.
+	config := func(db *pgx.Conn) string {
+		return provider + fmt.Sprintf("resource \"cipherstash_eql_v4\" \"this\" {\n database = %q\n version = %q\n}\n", db.Config().Database, version) +
+			"resource \"terraform_data\" \"grant\" {\n input = cipherstash_eql_v4.this.schema\n}\n"
+	}
+	setVersion := func(reported string) func() {
+		return sql(db, "CREATE OR REPLACE FUNCTION eql_v4.version() RETURNS text IMMUTABLE STRICT LANGUAGE sql AS $$SELECT '"+reported+"'$$")
+	}
+	uninstalled := func(db *pgx.Conn) resource.TestCheckFunc {
+		return func(*terraform.State) error {
+			if eqlInstalled(t, db) || eqlLeftovers(t.Context(), t, db) != 0 {
+				return fmt.Errorf("EQL or its domains and functions in public remain in %s", db.Config().Database)
+			}
+
+			return nil
+		}
+	}
 	tc := cliTestCase(t, newServiceFixture(t))
 	tc.Steps = []resource.TestStep{
 		{
-			Config: config,
+			Config: config(db),
 			ConfigStateChecks: []statecheck.StateCheck{
 				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("version"), knownvalue.StringExact(version)),
 				statecheck.ExpectKnownValue("cipherstash_eql_v4.this", tfjsonpath.New("sha256"), knownvalue.StringExact(digest)),
@@ -971,12 +1008,31 @@ func TestCLIPostgresEQLLifecycle(t *testing.T) {
 			},
 		},
 		{ResourceName: "cipherstash_eql_v4.this", ImportState: true, ImportStateId: db.Config().Database, ImportStateVerify: true},
-		{Config: provider, ExpectError: regexp.MustCompile("EQL is still installed")},
+		// Without an uninstaller for the version refresh reads, destroy fails
+		// while planning, before Terraform destroys the marker.
+		{PreConfig: setVersion("go-0.0.0"), Config: provider, ExpectError: regexp.MustCompile(`EQL uninstall refused[\s\S]*reports EQL go-0\.0\.0`)},
+		{PreConfig: setVersion(version), Config: config(db), ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}}},
+		// Changing database uninstalls from the old one, then installs in the new one.
 		{
-			PreConfig: func() {
-				_, err := db.Exec(t.Context(), "DROP SCHEMA eql_v4 CASCADE; DROP SCHEMA eql_v4_internal CASCADE")
-				require.NoError(t, err)
-			},
+			Config:           config(other),
+			ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction("cipherstash_eql_v4.this", plancheck.ResourceActionDestroyBeforeCreate)}},
+			Check: resource.ComposeTestCheckFunc(uninstalled(db), func(*terraform.State) error {
+				if !eqlInstalled(t, other) {
+					return fmt.Errorf("replacement did not install EQL in the new database")
+				}
+
+				return nil
+			}),
+		},
+		{
+			PreConfig:   sql(other, "CREATE TABLE encrypted (email public.eql_v4_text_eq)"),
+			Config:      provider,
+			ExpectError: regexp.MustCompile(`EQL uninstall refused[\s\S]*column email of table encrypted`),
+		},
+		{PreConfig: sql(other, "DROP TABLE encrypted"), Config: provider, Check: uninstalled(other)},
+		{Config: config(db)},
+		{
+			PreConfig:          sql(db, "DROP SCHEMA eql_v4 CASCADE; DROP SCHEMA eql_v4_internal CASCADE"),
 			RefreshState:       true,
 			ExpectNonEmptyPlan: true,
 			Check: func(s *terraform.State) error {
@@ -1020,7 +1076,8 @@ func TestCLIPostgresEQLImport(t *testing.T) {
 // TestCLIPostgresEQLUpgradeModel runs Terraform against a model of one
 // database's EQL installation while its version changes. The provider refuses
 // to change an installed version, so the supported upgrade is: stop managing
-// the installation, reinstall by hand, then import it.
+// the installation, reinstall by hand, then import it. Destroy uninstalls once
+// the table of EQL-typed columns is gone, so a trace can install again.
 func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 	admin := postgresAdmin(t)
 	cliTestCase(t, newServiceFixture(t)) // Pinned CLI and isolated CLI configuration.
@@ -1030,7 +1087,8 @@ func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 
 	// Fixed traces cover every upgrade path whatever the random budget: each
 	// installs its first version through Terraform, then for every later
-	// version tries the change in Terraform before upgrading by hand.
+	// version tries the change in Terraform before upgrading by hand. Each
+	// ends by uninstalling and installing its first version again.
 	var paths [][]string
 	for i := range versions {
 		for _, next := range versions[i+1:] {
@@ -1063,9 +1121,20 @@ func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 				}
 			}
 
+			require.Equal(t, path[len(path)-1], m.state)
+			for _, step := range []func(){
+				func() { m.destroy(t) },
+				func() { m.dropTable(t) },
+				func() { m.destroy(t) },
+				func() { m.apply(t, path[0]) },
+			} {
+				step()
+				m.check(t)
+			}
+
 			require.True(t, m.managed)
 			require.True(t, m.indexed)
-			require.Equal(t, path[len(path)-1], m.state)
+			require.Equal(t, path[0], m.state)
 		})
 	}
 
@@ -1081,8 +1150,10 @@ func TestCLIPostgresEQLUpgradeModel(t *testing.T) {
 				"refresh":      func(r *rapid.T) { m.refresh(r) },
 				"import":       func(r *rapid.T) { m.importExisting(r) },
 				"forget":       func(r *rapid.T) { m.forget(r) },
+				"destroy":      func(r *rapid.T) { m.destroy(r) },
+				"drop table":   func(r *rapid.T) { m.dropTable(r) },
 				"rebuild indexes": func(r *rapid.T) {
-					if m.installed == "" || m.indexed {
+					if m.installed == "" || m.indexed || !m.table {
 						r.Skip("no dropped indexes") // Before any draw, so rapid draws another action.
 					}
 
@@ -1228,6 +1299,31 @@ func (m *eqlUpgradeModel) importExisting(t rapid.TB) {
 	}
 }
 
+// destroy removes the resource block and applies. Destroy uninstalls EQL
+// unless a column still uses an EQL domain.
+func (m *eqlUpgradeModel) destroy(t rapid.TB) {
+	t.Helper()
+	m.write(t, "")
+	err := m.tf.Apply(m.ctx, m.reattach)
+	switch {
+	case !m.managed:
+		require.NoError(t, err)
+	case m.table:
+		require.ErrorContains(t, err, "EQL uninstall refused")
+		m.state = m.installed // Planning refreshed, and a failed Delete keeps that state.
+	default:
+		require.NoError(t, err)
+		m.installed, m.managed, m.state, m.indexed = "", false, "", false
+	}
+}
+
+func (m *eqlUpgradeModel) dropTable(t rapid.TB) {
+	t.Helper()
+	_, err := m.db.Exec(m.ctx, "DROP TABLE IF EXISTS encrypted")
+	require.NoError(t, err)
+	m.table, m.indexed = false, false
+}
+
 // forget stops managing the installation without changing the database.
 func (m *eqlUpgradeModel) forget(t rapid.TB) {
 	t.Helper()
@@ -1247,6 +1343,9 @@ func (m *eqlUpgradeModel) check(t rapid.TB) {
 	}
 
 	require.Equal(t, m.installed, installed, "installed version differs from the model")
+	if m.installed == "" {
+		require.Zero(t, eqlLeftovers(m.ctx, t, m.db), "EQL domains or functions remain in public without EQL")
+	}
 
 	// Terraform never touches user tables or indexes; only a reinstall drops
 	// the indexes. Index operator classes come from pg_index, because

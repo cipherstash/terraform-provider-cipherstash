@@ -116,7 +116,7 @@ Names identify the owning service: `cts` means CipherStash Token Service, which 
 | [`cipherstash_zerokms_keyset`](docs/resources/zerokms_keyset.md) | A keyset's name, description, and enabled status | Updates the existing keyset. Destroy disables it; it does not delete key material. |
 | [`cipherstash_zerokms_keyset_grant`](docs/resources/zerokms_keyset_grant.md) | One client/keyset grant | Changing either ID replaces the grant. Destroy revokes only that pair. |
 | [`cipherstash_zerokms_client` data source](docs/data-sources/zerokms_client.md) | Read-only client metadata | Does not import, change, or delete the client or its grants. |
-| [`cipherstash_eql_v4`](docs/resources/eql_v4.md) | EQL v4 installed in one PostgreSQL database | Changing `database` replaces it; changing `version` is rejected. Destroy never uninstalls EQL. |
+| [`cipherstash_eql_v4`](docs/resources/eql_v4.md) | EQL v4 installed in one PostgreSQL database | Changing `database` replaces it; changing `version` is rejected. Destroy uninstalls EQL unless a column or another object still uses it. |
 
 These names replace the earlier development types `cipherstash_actor`, `cipherstash_client`, `cipherstash_keyset` and `cipherstash_keyset_grant`. The old names are not registered, and there is no automatic cross-type state migration. If existing state uses the old types, retain the previous provider binary and protected state backups until you have planned a migration. Changing HCL type names alone does not migrate state. Import cannot recover creation-only credentials.
 
@@ -148,7 +148,7 @@ The lookup returns the client's `name`, `description`, and all granted `keyset_i
 
 ### Install EQL v4
 
-`cipherstash_eql_v4` installs EQL v4 into the database named by `database`, on the server from the provider's `database` settings. `version` must be a version compiled into the provider, such as `go-0.1.0-rc.3`; the provider contains each version's `eql-v4-install.sql` release asset byte for byte and checks it against its SHA-256. Until cipherstash/stack publishes a stable Go release, the provider contains only the latest release candidate and the one before it.
+`cipherstash_eql_v4` installs EQL v4 into the database named by `database`, on the server from the provider's `database` settings. `version` must be a version compiled into the provider, such as `go-0.1.0-rc.3`; the provider contains each version's `eql-v4-install.sql` and `eql-v4-uninstall.sql` release assets byte for byte and checks them against their SHA-256 digests. Until cipherstash/stack publishes a stable Go release, the provider contains only the latest release candidate and the one before it.
 
 ```hcl
 resource "postgresql_extension" "pgcrypto" {
@@ -215,7 +215,23 @@ Plan a maintenance window: from the reinstall until the grants are restored, rol
 
 The installer creates the column types in `public` only when they don't exist, so an upgraded database keeps the column types of the version first installed. Check the release notes for changes to them before upgrading.
 
-Destroy does not uninstall EQL: uninstalling would break every column typed with an EQL domain, and the domains in `public` would remain. Destroy fails while EQL is installed and succeeds once it is gone. To stop managing an installation, use a `removed` block with `lifecycle { destroy = false }` or `terraform state rm`. Because Terraform destroys dependents first, a `terraform destroy` of a root like the one above revokes the grants before failing on EQL.
+#### Uninstall EQL
+
+Destroy used to fail while EQL was installed; it now uninstalls EQL. It runs in one transaction, under the same lock and timeouts as Create, and changes nothing and fails if:
+
+- any column uses a `public.eql_v4_*` domain or an array of one, in a table, partitioned table, view, materialized view, foreign table or composite type. Without EQL, columns of the JSON search domains reject every write, and the other columns compare whole ciphertexts instead of search terms. Drop the columns, or decrypt them into other types, first;
+- any object outside EQL depends on it, such as an index, view, constraint, policy, generated column or SQL function that calls an EQL function, or a column typed with a type from schema `eql_v4`. The operators the installer creates in `public` don't count;
+- the role lacks the privileges of the owner of the EQL schemas, or of the `eql_v4_*` domains and functions in `public`;
+- the provider has no uninstaller for the version the database reports. It contains the uninstallers for the same releases as the installers. Planning checks the version refresh read, so this fails before Terraform destroys anything else, such as the grants;
+- another installation holds the lock.
+
+The error names up to 20 of the columns or objects involved.
+
+Otherwise destroy runs that release's `eql-v4-uninstall.sql`, which drops the `eql_v4` and `eql_v4_internal` schemas with CASCADE. Upstream deliberately leaves the column domains in `public`, so that columns survive a reinstall, together with three validator functions. Because destroy refuses while any column uses them, it then drops every `public.eql_v4_*` domain and function. It does so without CASCADE, so anything else that depends on one, such as a function that takes an EQL domain as an argument, makes the whole uninstall roll back. A later install then starts clean, with its own release's domains. `pgcrypto` and the `extensions` schema stay.
+
+An uninstall takes one lock per object it drops, about 6,200 for go-0.1.0-rc.3, and holds them until it commits. PostgreSQL's default lock table has 6,400 slots for the whole server (`max_locks_per_transaction` × `max_connections`), so on a busy server the uninstall can fail with "out of shared memory" and roll back. Uninstall when the server is quiet, or raise `max_locks_per_transaction`, which needs a restart, beforehand.
+
+Terraform destroys dependents first, so a `terraform destroy` of a root like the one above revokes the grants before uninstalling EQL. Changing `database` uninstalls EQL from the old database, under the same refusals, before installing it in the new one. `lifecycle { prevent_destroy = true }` rejects a destroy plan. To stop managing an installation without uninstalling it, use a `removed` block with `lifecycle { destroy = false }` or `terraform state rm`.
 
 ## Understand lifecycle and recovery
 
@@ -341,7 +357,7 @@ The offline suite has four layers, and a fifth runs against PostgreSQL:
 | Direct native-backed tests (`failures_test.go`, `crud_test.go`, `provider_test.go`) | State retention on failed inventory reads, pagination and metadata ambiguity, partial keyset writes, uncertain grant/revoke outcomes, confirmed destroy, credential precedence, independent authentication lifetimes and cancellation. Native authentication verifies signed fixture tokens against local signing-key and HTTP fixtures; upstream error bodies must not enter diagnostics. |
 | Direct resource tests (`resources_test.go`) | Focused reconciliation tests with injected `manage` client results, including import restrictions, missing objects and partial failures. |
 | Public SDK (`pkg/stack/auth`, `pkg/stack/manage`) | Signed-token validation and refresh, service request contracts, malformed-inventory rejection, zero-grant clients, one-time secret export, cancellation, and no write retries or redirects. These tests use local service fixtures, not live credentials. |
-| PostgreSQL (`internal/eql`, `TestCLIPostgres*` in `cli_test.go`) | Runs only with `CS_TEST_POSTGRES_URL`. Installs EQL as a superuser and as a role without it, checks that every refusal leaves the database unchanged, and runs Terraform against the database: apply, import, refresh after an out-of-band uninstall, destroy refusal, and import of an installation made outside Terraform. A rapid state machine (`TestCLIPostgresEQLUpgradeModel`) runs Terraform through every upgrade path between the compiled-in versions: changing `version` is rejected with nothing changed, and an upgrade made by hand is adopted by removing the resource from state, reinstalling and importing. It also checks that no Terraform action changes a table of EQL-typed columns or its functional indexes, that a reinstall drops those indexes, and that re-creating them binds the expected operator classes. The Tests workflow runs it against PostgreSQL 16 and 17. |
+| PostgreSQL (`internal/eql`, `TestCLIPostgres*` in `cli_test.go`) | Runs only with `CS_TEST_POSTGRES_URL`. Installs EQL as a superuser and as a role without it, checks that every refusal leaves the database unchanged, and runs Terraform against the database: apply, import, refresh after an out-of-band uninstall, uninstall on destroy and replacement and its refusals, and import of an installation made outside Terraform. A rapid state machine (`TestCLIPostgresEQLUpgradeModel`) runs Terraform through every upgrade path between the compiled-in versions: changing `version` is rejected with nothing changed, and an upgrade made by hand is adopted by removing the resource from state, reinstalling and importing. Destroy uninstalls once the table of EQL-typed columns is dropped, so traces install again afterwards, and no EQL domains or functions may remain in `public`. It also checks that no Terraform action changes a table of EQL-typed columns or its functional indexes, that a reinstall drops those indexes, and that re-creating them binds the expected operator classes. The Tests workflow runs it against PostgreSQL 16 and 17. |
 
 CLI tests use `resource.UnitTest`, so they run without live-acceptance opt-in. They require the pinned Terraform on `PATH` and fail rather than download another version. Run them through mise, which supplies the actual executable rather than a tool shim. Each case uses a temporary CLI configuration and fake credentials. The in-process provider's transport only permits local fixture routing. Tests run serially because they replace the process-default transport and environment. This setup tests separate provider session ownership directly, not Terraform provider aliases or binary installation.
 

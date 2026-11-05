@@ -448,15 +448,11 @@ The invoices service now has everything it needs: the four `CS_*` variables to r
 
 ## Clean up
 
-The provider refuses to uninstall EQL, because uninstalling would break every encrypted column that uses its types. The database disappears with the container anyway, so tell Terraform to forget the database-side resources, then destroy the CipherStash ones:
+Destroy everything Terraform created, then remove the container:
 
 ```shell
-terraform state rm \
-  cipherstash_eql_v4.invoices \
-  postgresql_role.invoices_app \
-  postgresql_grant.invoices_app_eql && \
-  terraform destroy -auto-approve && \
+terraform destroy -auto-approve && \
   docker rm --force invoices-postgres
 ```
 
-Destroying deletes the actor, its access key, the client and the keyset grant. The keyset itself can't be deleted, so Terraform disables it and leaves it in your workspace.
+Destroying revokes the grants, drops the `invoices_app` role and uninstalls EQL, which works because no table uses EQL's types. It also deletes the actor, its access key, the client and the keyset grant. The keyset itself can't be deleted, so Terraform disables it and leaves it in your workspace.

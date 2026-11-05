@@ -52,6 +52,22 @@ func (d postgresDatabase) InstallEQL(ctx context.Context, database, version stri
 	return eql.Install(ctx, conn, version, requireORE)
 }
 
+func (d postgresDatabase) UninstallEQL(ctx context.Context, database string) error {
+	conn, err := d.connect(ctx, database)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "3D000" {
+		// The database is gone, and EQL with it.
+		return nil
+	}
+
+	if err != nil {
+		return err
+	}
+
+	defer closeConn(ctx, conn)
+
+	return eql.Uninstall(ctx, conn)
+}
+
 func closeConn(ctx context.Context, conn *pgx.Conn) {
 	if err := conn.Close(ctx); err != nil {
 		tflog.Debug(ctx, "Closing the PostgreSQL connection failed")
@@ -121,6 +137,10 @@ func databaseError(err error) string {
 		return "PostgreSQL rejected the credentials. Check the provider's database username and password."
 	case code == "3D000":
 		return "The database does not exist on the configured PostgreSQL server."
+	case code == "2BP01":
+		return "Other database objects still depend on an object the operation drops, so it rolled back. Remove them and retry."
+	case code == "53200":
+		return "PostgreSQL ran out of shared memory, usually because the operation needs more locks than the lock table has free. Retry when the server is quiet, or raise max_locks_per_transaction, which needs a server restart."
 	case code == "42501":
 		return "The database role lacks a privilege the operation needs."
 	case code == "55P03":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/internal/eql"
@@ -13,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
 )
@@ -734,8 +736,9 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 }
 
 type testEQL struct {
-	inspect func(database string) (eql.Installation, error)
-	install func(database, version string, requireORE bool) error
+	inspect   func(database string) (eql.Installation, error)
+	install   func(database, version string, requireORE bool) error
+	uninstall func(database string) error
 }
 
 func (d testEQL) InspectEQL(_ context.Context, database string) (eql.Installation, error) {
@@ -744,6 +747,10 @@ func (d testEQL) InspectEQL(_ context.Context, database string) (eql.Installatio
 
 func (d testEQL) InstallEQL(_ context.Context, database, version string, requireORE bool) error {
 	return d.install(database, version, requireORE)
+}
+
+func (d testEQL) UninstallEQL(_ context.Context, database string) error {
+	return d.uninstall(database)
 }
 
 var (
@@ -821,7 +828,7 @@ func TestEQLCreateStateOnFailure(t *testing.T) {
 	}
 }
 
-func TestEQLRefreshImportAndDelete(t *testing.T) {
+func TestEQLRefreshAndImport(t *testing.T) {
 	for _, scenario := range []string{"present", "changed", "absent", "failed read"} {
 		t.Run(scenario, func(t *testing.T) {
 			r := &eqlResource{database: testEQL{inspect: func(database string) (eql.Installation, error) {
@@ -864,12 +871,52 @@ func TestEQLRefreshImportAndDelete(t *testing.T) {
 			if scenario == "present" {
 				require.True(t, imported.State.Raw.Equal(before.Raw), "import differs from a created installation")
 			}
+		})
+	}
+}
 
+func TestEQLDeleteStateOnFailure(t *testing.T) {
+	inUse := &eql.ObjectsError{Err: eql.ErrInUse, Names: []string{"column email of table encrypted"}, Total: 21}
+	commitUnknown := fmt.Errorf("%w: %w", eql.ErrCommitUnknown, upstreamDatabaseErr)
+	for _, tc := range []struct {
+		name                   string
+		uninstallErr, readErr  error
+		installed              bool
+		wantError, wantWarning bool
+		wantDetail             string
+	}{
+		{name: "uninstalled"},
+		{name: "refused", uninstallErr: inUse, wantError: true, wantDetail: "column email of table encrypted and 20 more"},
+		{name: "rolled back", uninstallErr: upstreamDatabaseErr, wantError: true, wantDetail: "rolled back"},
+		{name: "partial installation", uninstallErr: eql.ErrPartial, wantError: true, wantDetail: "not a complete EQL v4 installation"},
+		{name: "commit unknown and absent", uninstallErr: commitUnknown, wantWarning: true},
+		{name: "commit unknown and installed", uninstallErr: commitUnknown, installed: true, wantError: true, wantDetail: "did not commit"},
+		{name: "commit unknown and read failed", uninstallErr: commitUnknown, readErr: upstreamDatabaseErr, wantError: true, wantDetail: "inspect the database"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &eqlResource{database: testEQL{
+				uninstall: func(database string) error {
+					require.Equal(t, "app", database)
+
+					return tc.uninstallErr
+				},
+				inspect: func(string) (eql.Installation, error) {
+					require.ErrorIs(t, tc.uninstallErr, eql.ErrCommitUnknown, "inspected without an unknown commit")
+					if tc.installed {
+						return installedEQL(), nil
+					}
+
+					return eql.Installation{}, tc.readErr
+				},
+			}}
+			before := resourceState(t, r, savedEQL())
 			deleted := resource.DeleteResponse{State: before}
 			r.Delete(context.Background(), resource.DeleteRequest{State: before}, &deleted)
-			require.Equal(t, scenario != "absent", deleted.Diagnostics.HasError(), "%v", deleted.Diagnostics)
+			require.Equal(t, tc.wantError, deleted.Diagnostics.HasError(), "%v", deleted.Diagnostics)
+			require.Equal(t, tc.wantWarning, deleted.Diagnostics.WarningsCount() > 0, "%v", deleted.Diagnostics)
+			require.Contains(t, fmt.Sprint(deleted.Diagnostics), tc.wantDetail)
 			require.NotContains(t, fmt.Sprint(deleted.Diagnostics), "fixture-upstream-secret")
-			if scenario != "absent" {
+			if tc.wantError {
 				require.True(t, deleted.State.Raw.Equal(before.Raw), "failed delete discarded the installation")
 			}
 		})
@@ -886,4 +933,46 @@ func TestEQLPlanRejectsVersionChange(t *testing.T) {
 	r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{State: state, Plan: tfsdk.Plan(planned)}, &resp)
 	require.True(t, resp.Diagnostics.HasError())
 	require.Equal(t, "EQL upgrades are not supported", resp.Diagnostics[0].Summary())
+}
+
+func TestEQLPlanRefusesUninstallWithoutUninstaller(t *testing.T) {
+	for _, tc := range []struct {
+		name, version string
+		destroy       bool
+		database      string
+		wantError     bool
+	}{
+		{name: "destroy", version: "go-0.0.1", destroy: true, wantError: true},
+		{name: "replace", version: "go-0.0.1", database: "other", wantError: true},
+		{name: "destroy compiled-in version", version: testEQLVersion, destroy: true},
+		{name: "replace compiled-in version", version: testEQLVersion, database: "other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// No database: the check reads only state.
+			r := &eqlResource{}
+			saved := savedEQL()
+			saved.Version = types.StringValue(tc.version)
+			state := resourceState(t, r, saved)
+			planned := tfsdk.Plan{Schema: state.Schema, Raw: tftypes.NewValue(state.Schema.Type().TerraformType(context.Background()), nil)}
+			if !tc.destroy {
+				replacement := saved
+				replacement.Database, replacement.Version = types.StringValue(tc.database), types.StringValue(testEQLVersion)
+				planned = tfsdk.Plan(resourceState(t, r, replacement))
+			}
+
+			resp := resource.ModifyPlanResponse{Plan: planned}
+			r.ModifyPlan(context.Background(), resource.ModifyPlanRequest{State: state, Plan: planned}, &resp)
+			if !tc.wantError {
+				// A compiled-in version passes; a replacement still reports
+				// the version change it asks for.
+				require.False(t, slices.ContainsFunc(resp.Diagnostics, func(d diag.Diagnostic) bool { return d.Summary() == "EQL uninstall refused" }), "%v", resp.Diagnostics)
+
+				return
+			}
+
+			require.True(t, resp.Diagnostics.HasError())
+			require.Equal(t, "EQL uninstall refused", resp.Diagnostics[0].Summary())
+			require.Contains(t, resp.Diagnostics[0].Detail(), "reports EQL go-0.0.1")
+		})
+	}
 }
