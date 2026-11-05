@@ -597,7 +597,7 @@ func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 
 				keysets := []manage.ZeroKMSKeyset{{ID: tenantKeysetID, Name: "unrelated", Description: "unrelated"}}
 				if opts.ShowDisabled && scenario != "missing" {
-					keysets = append(keysets, manage.ZeroKMSKeyset{ID: keysetID, Name: "renamed", Description: "new description", IsDisabled: true, IsDefault: true})
+					keysets = append(keysets, manage.ZeroKMSKeyset{ID: keysetID, Name: "renamed", Description: "new description", IsDisabled: true})
 				}
 
 				return keysets, nil
@@ -626,7 +626,7 @@ func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 					require.Equal(t, "renamed", saved.Name.ValueString())
 					require.Equal(t, "new description", saved.Description.ValueString())
 					require.False(t, saved.Enabled.ValueBool())
-					require.True(t, saved.IsDefault.ValueBool())
+					require.False(t, saved.IsDefault.ValueBool())
 					require.True(t, read.State.Raw.Equal(imported.State.Raw), "refresh/import disagree")
 				}
 			}
@@ -694,7 +694,7 @@ func TestKeysetUpdatePreservesPartialSuccess(t *testing.T) {
 }
 
 func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
-	for _, scenario := range []string{"enabled", "disabled", "missing", "preflight failed", "disable failed", "read failed", "still enabled"} {
+	for _, scenario := range []string{"enabled", "disabled", "missing", "default", "preflight failed", "disable failed", "read failed", "still enabled"} {
 		t.Run(scenario, func(t *testing.T) {
 			attempted := false
 			r := &keysetResource{client: testManage{
@@ -708,11 +708,11 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 						return nil, nil
 					}
 
-					return []manage.ZeroKMSKeyset{{ID: keysetID, Name: "retained", Description: "retained description", IsDisabled: scenario == "disabled" || (attempted && scenario != "still enabled")}}, nil
+					return []manage.ZeroKMSKeyset{{ID: keysetID, Name: "retained", Description: "retained description", IsDisabled: scenario == "disabled" || (attempted && scenario != "still enabled"), IsDefault: scenario == "default"}}, nil
 				},
 				disableKeyset: func(id string) error {
 					require.False(t, attempted, "unexpected disable mutation")
-					require.NotEqual(t, "disabled", scenario)
+					require.NotContains(t, []string{"disabled", "default"}, scenario)
 					require.Equal(t, keysetID, id)
 					attempted = true
 					if scenario == "disable failed" {

@@ -219,6 +219,60 @@ resource "cipherstash_zerokms_keyset" "app" {
 	}
 }
 
+// The workspace default keyset belongs to CipherStash: clients get it without
+// configuration, and no plan may import, change, disable or destroy it.
+func TestCLIDefaultKeysetIsServiceOwned(t *testing.T) {
+	f := newServiceFixture(t)
+	tc := cliTestCase(t, f)
+	client := cliProvider + `
+resource "cipherstash_zerokms_client" "api" {
+  name = "api"
+  description = "application client"
+}
+`
+	keyset := func(name string) string {
+		return client + fmt.Sprintf("resource \"cipherstash_zerokms_keyset\" \"app\" {\n name = %q\n description = \"Worker owned\"\n}\n", name)
+	}
+	noKeysetWrites := func(*terraform.State) error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+
+		for _, path := range f.mutations {
+			if strings.Contains(path, "keyset") {
+				return fmt.Errorf("unexpected keyset write %s", path)
+			}
+		}
+
+		if i := slices.IndexFunc(f.keysets, func(k manage.ZeroKMSKeyset) bool { return k.IsDefault }); i < 0 || f.keysets[i].IsDisabled {
+			return fmt.Errorf("the default keyset is missing or disabled")
+		}
+
+		return nil
+	}
+	tc.CheckDestroy = noKeysetWrites
+	tc.Steps = []resource.TestStep{
+		{Config: client, Check: resource.ComposeTestCheckFunc(noKeysetWrites, func(s *terraform.State) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+
+			if len(f.clients) != 1 || !slices.Equal(f.clients[0].KeysetIDs, []string{keysetID}) {
+				return fmt.Errorf("a new client did not receive exactly the default keyset")
+			}
+
+			return nil
+		})},
+		{Config: keyset("default"), ResourceName: "cipherstash_zerokms_keyset.app", ImportState: true, ImportStateId: keysetID, ExpectError: regexp.MustCompile("Cannot import the workspace default keyset")},
+		// State from before the provider refused the default: import another
+		// keyset, then let the service report it as the default.
+		{Config: keyset("external"), ResourceName: "cipherstash_zerokms_keyset.app", ImportState: true, ImportStatePersist: true, ImportStateId: tenantKeysetID},
+		{PreConfig: func() { f.edit(func() { f.keysets[0].IsDefault, f.keysets[1].IsDefault = false, true }) }, RefreshState: true},
+		{Config: keyset("renamed"), PlanOnly: true, ExpectError: regexp.MustCompile("Cannot change the workspace default keyset")},
+		{Config: client, PlanOnly: true, ExpectError: regexp.MustCompile("Cannot destroy the workspace default keyset")},
+		{Config: client + "removed {\n from = cipherstash_zerokms_keyset.app\n lifecycle {\n destroy = false\n }\n}\n", Check: noKeysetWrites},
+	}
+	resource.UnitTest(t, tc)
+}
+
 func TestCLIGrantOwnership(t *testing.T) {
 	f := newServiceFixture(t)
 	tc := cliTestCase(t, f)

@@ -124,13 +124,13 @@ Give each managed object one owner. For example, Terraform can manage a shared a
 
 ### Manage client access
 
-A new ZeroKMS client receives a grant to the workspace's default keyset. The client resource manages identity, not grants. Its deprecated, computed `keyset_id` records historical creation or import metadata, not current access; you cannot configure that argument. Refresh preserves this value and the client key even if the historical grant disappears or the client has no grants.
+Declare an ordinary `cipherstash_zerokms_client` for each application client. Create does not choose a keyset, so CipherStash creates the workspace's default keyset if it does not exist yet, or reuses it, and grants the new client access to it. CipherStash owns that default keyset and those grants: you do not need to import or manage either, and there is no input for the default keyset's name or description. The client resource manages identity, not grants. Its deprecated, computed `keyset_id` records historical creation or import metadata, not current access; you cannot configure that argument. Refresh preserves this value and the client key even if the historical grant disappears or the client has no grants.
 
-Use `cipherstash_zerokms_keyset_grant` to manage any grant explicitly, including the automatic default grant. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state.
+Use `cipherstash_zerokms_keyset_grant` for access to keysets you manage, such as a shared application keyset; provisioning automation can own tenant keysets and their grants the same way. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state. Importing a client's default-keyset grant still works, but it is not needed. To stop managing such a grant, use a `removed` block that sets `lifecycle { destroy = false }`: destroying it asks CipherStash to revoke the client's creation grant, which it refuses, as the next paragraph describes.
 
 CipherStash refuses to revoke a client's creation grant: the grant to the keyset the client was created with, which is the workspace's default keyset unless another was chosen. The revoke request returns HTTP 400, so destroying a grant resource for that pair fails with "Cannot revoke keyset grant", reports that CipherStash rejected the request as invalid (HTTP 400), and keeps the pair in state. To remove that access, delete the client. Every other grant can be revoked.
 
-Client refresh and import never add, restore or revoke grants. Use the existing `cipherstash_zerokms_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
+Client refresh and import never add, restore or revoke grants, and never enable, rename or disable the default keyset. Deleting a client deletes only the client; the default keyset stays enabled for every other client. Use the existing `cipherstash_zerokms_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
 
 Replacing a client creates a different identity. Grants associated with the old client are not transferred to it. Plan credential and grant changes separately; consider `lifecycle { prevent_destroy = true }` for an established client. This provider does not implement an application cutover or prove that deleting a client physically removes every grant record on the service.
 
@@ -233,7 +233,7 @@ Import brings an existing object under Terraform management; it does not recover
 | --- | --- | --- |
 | Actor | Actor ID, such as `app-JBSWY3DPEHPK3PXP` | Recover `access_key` or `token_expiry`; both are null after import. Setting a token lifetime afterward can require replacement. |
 | Client | Client UUID, with zero, one or many grants; legacy `client UUID/keyset UUID` is also accepted | Recover `client_key` or change grants. UUID-only imports leave `keyset_id` null. Legacy pair imports record the second UUID as historical metadata only, even if that grant no longer exists. |
-| Keyset | Keyset UUID | Delete key material or select the workspace default. Import includes disabled keysets; set `enabled = false` to keep one disabled. |
+| Keyset | Keyset UUID | Delete key material or select the workspace default. Import refuses the workspace default keyset, which CipherStash owns. Import includes disabled keysets; set `enabled = false` to keep one disabled. |
 | Grant | `client UUID/keyset UUID` | Create the pair or change other grants. |
 
 The example IDs are placeholders. To keep an imported actor or client, use its previously saved credential from your secret store. To obtain a new credential, replace the resource and plan the change for its consumers.
@@ -277,6 +277,8 @@ CipherStash rejects metadata updates while a keyset is disabled. When a plan ena
 Destroy disables the keyset, confirms that it is disabled or absent, and removes it from state. The keyset and key material remain in CipherStash. An already-disabled keyset needs no write. A failed disable, failed follow-up read, or still-enabled result returns an error and retains state. Disabling can interrupt every client using the keyset, including clients with worker-managed grants; the grants themselves remain.
 
 Import does not enable a disabled keyset, but configuration defaults `enabled` to `true`. Set `enabled = false` to keep it disabled. A new keyset is always created enabled; `enabled = false` is applied afterward, with the returned ID saved first. If that request fails, inspect state and the next plan before retrying. To manage a keyset again after destroy, import its retained ID. The provider does not automatically adopt an existing keyset by name.
+
+The workspace default keyset is not a keyset this resource manages. Import refuses it, and if state already holds it, for example from an earlier import, any plan that would rename, re-describe, enable, disable or destroy it fails. Remove it from management with a `removed` block that sets `lifecycle { destroy = false }`; deleting the resource block alone plans a destroy, which fails.
 
 Use `lifecycle { prevent_destroy = true }` to reject a destroy plan while the resource block remains configured. It does not prevent an in-place `enabled = false` update, and it stops protecting the resource if you remove the entire block. To stop managing a keyset without disabling it, use Terraform's `removed` block with `lifecycle { destroy = false }` rather than a normal destroy.
 

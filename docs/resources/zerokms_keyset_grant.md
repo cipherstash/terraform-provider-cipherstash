@@ -5,7 +5,7 @@ subcategory: ""
 description: |-
   Grant a ZeroKMS client access to one keyset. This resource manages a single client/keyset pair, not the client's full set of grants. Your application must still select the keyset in its SDK configuration.
   Destroy revokes only this grant; it does not delete the client or keyset, or change other grants. Changing either ID replaces the grant without transferring any other grants.
-  Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. This includes the automatic default-keyset grant of a cipherstash_zerokms_client: the client resource manages identity only and does not require that grant to remain present.
+  Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. You do not need this resource for the default-keyset grant a new cipherstash_zerokms_client receives: CipherStash owns that grant. Existing imports of such a pair keep working.
   CipherStash refuses to revoke a client's creation grant, the grant to the keyset the client was created with, and returns HTTP 400. Destroying this resource for that pair therefore fails and keeps the pair in state; delete the client instead. Other grants can be revoked. Granting a pair that already exists returns HTTP 409. Full Terraform keyset/grant lifecycle verification and live zero-grant inventory evidence remain outstanding. Inventory absence does not prove immediate credential invalidation. See the README's live verification limits.
 ---
 
@@ -15,7 +15,7 @@ Grant a ZeroKMS client access to one keyset. This resource manages a single clie
 
 Destroy revokes only this grant; it does not delete the client or keyset, or change other grants. Changing either ID replaces the grant without transferring any other grants.
 
-Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. This includes the automatic default-keyset grant of a `cipherstash_zerokms_client`: the client resource manages identity only and does not require that grant to remain present.
+Give each pair one owner. Do not manage it from another Terraform resource, state, or provisioning worker. Import an existing pair rather than creating it again. You do not need this resource for the default-keyset grant a new `cipherstash_zerokms_client` receives: CipherStash owns that grant. Existing imports of such a pair keep working.
 
 CipherStash refuses to revoke a client's creation grant, the grant to the keyset the client was created with, and returns HTTP 400. Destroying this resource for that pair therefore fails and keeps the pair in state; delete the client instead. Other grants can be revoked. Granting a pair that already exists returns HTTP 409. Full Terraform keyset/grant lifecycle verification and live zero-grant inventory evidence remain outstanding. Inventory absence does not prove immediate credential invalidation. See the README's live verification limits.
 
