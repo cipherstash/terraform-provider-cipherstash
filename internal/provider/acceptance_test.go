@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -44,7 +44,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 		ids := map[string]bool{}
 		cursor := ""
 		for {
-			page, err := api.ListCTSActors(context.Background(), control.ListCTSActorsOptions{Limit: 100, Cursor: cursor})
+			page, err := api.ListCTSActors(context.Background(), manage.ListCTSActorsOptions{Limit: 100, Cursor: cursor})
 			if err != nil {
 				return nil, err
 			}
@@ -69,7 +69,7 @@ func TestAccActorAndClientLifecycle(t *testing.T) {
 			ids["key:"+key.ID] = true
 		}
 
-		clients, err := api.ListZeroKMSClients(context.Background(), control.ListZeroKMSClientsOptions{})
+		clients, err := api.ListZeroKMSClients(context.Background(), manage.ListZeroKMSClientsOptions{})
 		if err != nil {
 			return nil, err
 		}

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -18,7 +18,7 @@ import (
 )
 
 type keysetGrantResource struct {
-	client controlClient
+	client manageClient
 }
 
 var (
@@ -210,7 +210,7 @@ func (r *keysetGrantResource) ImportState(ctx context.Context, req resource.Impo
 }
 
 func (r *keysetGrantResource) hasGrant(ctx context.Context, state keysetGrantModel) (bool, error) {
-	clients, err := r.client.ListZeroKMSClients(ctx, control.ListZeroKMSClientsOptions{})
+	clients, err := r.client.ListZeroKMSClients(ctx, manage.ListZeroKMSClientsOptions{})
 	if err != nil {
 		return false, err
 	}

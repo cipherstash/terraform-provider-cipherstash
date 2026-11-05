@@ -3,7 +3,7 @@ package provider
 import (
 	"context"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
@@ -12,7 +12,7 @@ import (
 )
 
 type clientDataSource struct {
-	client controlClient
+	client manageClient
 }
 
 var _ datasource.DataSourceWithConfigure = &clientDataSource{}
@@ -77,7 +77,7 @@ func (d *clientDataSource) Read(ctx context.Context, req datasource.ReadRequest,
 		return
 	}
 
-	clients, err := d.client.ListZeroKMSClients(ctx, control.ListZeroKMSClientsOptions{})
+	clients, err := d.client.ListZeroKMSClients(ctx, manage.ListZeroKMSClientsOptions{})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot read client", operationError(err))
 		return

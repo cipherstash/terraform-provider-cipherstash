@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth"
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
@@ -87,7 +87,7 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 	}
 
 	// Decode only the selected values, never falling back to the environment again.
-	var clientConfig control.Config[auth.AdminAccessKey]
+	var clientConfig manage.Config[auth.AdminAccessKey]
 	if err := envconfig.ProcessWith(ctx, &envconfig.Config{
 		Target: &clientConfig,
 		Lookuper: envconfig.MapLookuper(map[string]string{
@@ -125,7 +125,7 @@ func (p *Provider) Configure(ctx context.Context, req provider.ConfigureRequest,
 		return
 	}
 
-	client, err := control.NewClient(clientConfig.WorkspaceCRN, tokens)
+	client, err := manage.NewClient(clientConfig.WorkspaceCRN, tokens)
 	if err != nil {
 		cancel()
 		resp.Diagnostics.AddError("Cannot configure CipherStash client", "Could not initialize the service client for the configured workspace.")
@@ -181,29 +181,29 @@ func (s *protocolServer) StopProvider(ctx context.Context, req *tfprotov6.StopPr
 
 // This boundary is exactly the native operations used by resource reconciliation;
 // tests can inject failures without a second HTTP/authentication implementation.
-type controlClient interface {
-	CreateCTSActor(context.Context, control.CreateCTSActorOptions) (*control.CreatedCTSActor, error)
-	ListCTSActors(context.Context, control.ListCTSActorsOptions) (control.CTSActorPage, error)
+type manageClient interface {
+	CreateCTSActor(context.Context, manage.CreateCTSActorOptions) (*manage.CreatedCTSActor, error)
+	ListCTSActors(context.Context, manage.ListCTSActorsOptions) (manage.CTSActorPage, error)
 	DeleteCTSActor(context.Context, string) error
-	ListCTSAccessKeys(context.Context) ([]control.CTSAccessKeyMetadata, error)
-	CreateZeroKMSClient(context.Context, control.CreateZeroKMSClientOptions) (*control.CreatedZeroKMSClient, error)
-	ListZeroKMSClients(context.Context, control.ListZeroKMSClientsOptions) ([]control.ZeroKMSClient, error)
+	ListCTSAccessKeys(context.Context) ([]manage.CTSAccessKeyMetadata, error)
+	CreateZeroKMSClient(context.Context, manage.CreateZeroKMSClientOptions) (*manage.CreatedZeroKMSClient, error)
+	ListZeroKMSClients(context.Context, manage.ListZeroKMSClientsOptions) ([]manage.ZeroKMSClient, error)
 	DeleteZeroKMSClient(context.Context, string) error
 	GrantZeroKMSKeyset(context.Context, string, string) error
 	RevokeZeroKMSKeyset(context.Context, string, string) error
-	CreateZeroKMSKeyset(context.Context, control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error)
-	ListZeroKMSKeysets(context.Context, control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error)
-	ModifyZeroKMSKeyset(context.Context, string, control.ModifyZeroKMSKeysetOptions) error
+	CreateZeroKMSKeyset(context.Context, manage.CreateZeroKMSKeysetOptions) (*manage.CreatedZeroKMSKeyset, error)
+	ListZeroKMSKeysets(context.Context, manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error)
+	ModifyZeroKMSKeyset(context.Context, string, manage.ModifyZeroKMSKeysetOptions) error
 	EnableZeroKMSKeyset(context.Context, string) error
 	DisableZeroKMSKeyset(context.Context, string) error
 }
 
-func clientFromProviderData(data any) (controlClient, error) {
+func clientFromProviderData(data any) (manageClient, error) {
 	if data == nil {
 		return nil, nil
 	}
 
-	client, ok := data.(controlClient)
+	client, ok := data.(manageClient)
 	if !ok {
 		return nil, fmt.Errorf("unexpected provider data type %T", data)
 	}
@@ -213,19 +213,19 @@ func clientFromProviderData(data any) (controlClient, error) {
 
 // Never render upstream error text: service responses can echo submitted data.
 func operationError(err error) string {
-	httpErr, _ := errors.AsType[*control.HTTPError](err)
+	httpErr, _ := errors.AsType[*manage.HTTPError](err)
 	switch {
 	case httpErr != nil && httpErr.StatusCode == http.StatusBadRequest:
 		return "CipherStash rejected the request as invalid (HTTP 400). Retrying it unchanged will fail the same way."
-	case errors.Is(err, control.ErrForbidden):
+	case errors.Is(err, manage.ErrForbidden):
 		return "CipherStash denied this operation. Check the Admin credential and its permissions."
-	case errors.Is(err, control.ErrAuthentication):
+	case errors.Is(err, manage.ErrAuthentication):
 		return "CipherStash authentication failed. Check the Admin credential and workspace CRN."
-	case errors.Is(err, control.ErrConflict):
+	case errors.Is(err, manage.ErrConflict):
 		return "CipherStash reports a conflicting resource. Import the existing object or choose a different name."
-	case errors.Is(err, control.ErrNotFound):
+	case errors.Is(err, manage.ErrNotFound):
 		return "CipherStash could not find the requested object."
-	case errors.Is(err, control.ErrConfig):
+	case errors.Is(err, manage.ErrConfig):
 		return "The CipherStash client rejected the operation configuration."
 	default:
 		return "The CipherStash operation failed. Check service availability before retrying; writes are not automatically retried."

@@ -17,14 +17,14 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 )
 
 // actorResource is the machine identity resource. It is an actor rather than
 // a bare access key because CTS lets an access-key principal create and delete
 // actors (and the key each one owns) but refuses to delete bare access keys.
 type actorResource struct {
-	client controlClient
+	client manageClient
 }
 
 var (
@@ -129,7 +129,7 @@ func (r *actorResource) Create(ctx context.Context, req resource.CreateRequest, 
 		expiry = &v
 	}
 
-	created, err := r.client.CreateCTSActor(ctx, control.CreateCTSActorOptions{Name: plan.Name.ValueString(), Kind: control.CTSActorKind(plan.Kind.ValueString()), Role: control.CTSRole(plan.Role.ValueString()), TokenExpiry: expiry})
+	created, err := r.client.CreateCTSActor(ctx, manage.CreateCTSActorOptions{Name: plan.Name.ValueString(), Kind: manage.CTSActorKind(plan.Kind.ValueString()), Role: manage.CTSRole(plan.Role.ValueString()), TokenExpiry: expiry})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot create actor", operationError(err))
 		return
@@ -216,7 +216,7 @@ func (r *actorResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 
-	if err := r.client.DeleteCTSActor(ctx, state.ID.ValueString()); err != nil && !errors.Is(err, control.ErrNotFound) {
+	if err := r.client.DeleteCTSActor(ctx, state.ID.ValueString()); err != nil && !errors.Is(err, manage.ErrNotFound) {
 		resp.Diagnostics.AddError("Cannot delete actor", operationError(err))
 	}
 }
@@ -227,11 +227,11 @@ func (r *actorResource) ImportState(ctx context.Context, req resource.ImportStat
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-func (r *actorResource) findActor(ctx context.Context, id string) (*control.CTSActor, error) {
+func (r *actorResource) findActor(ctx context.Context, id string) (*manage.CTSActor, error) {
 	seen := map[string]bool{}
 	cursor := ""
 	for {
-		page, err := r.client.ListCTSActors(ctx, control.ListCTSActorsOptions{Limit: 100, Cursor: cursor})
+		page, err := r.client.ListCTSActors(ctx, manage.ListCTSActorsOptions{Limit: 100, Cursor: cursor})
 		if err != nil {
 			return nil, err
 		}
@@ -255,13 +255,13 @@ func (r *actorResource) findActor(ctx context.Context, id string) (*control.CTSA
 	}
 }
 
-func (r *actorResource) findAccessKey(ctx context.Context, state actorModel) (*control.CTSAccessKeyMetadata, error) {
+func (r *actorResource) findAccessKey(ctx context.Context, state actorModel) (*manage.CTSAccessKeyMetadata, error) {
 	keys, err := r.client.ListCTSAccessKeys(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var found *control.CTSAccessKeyMetadata
+	var found *manage.CTSAccessKeyMetadata
 	for _, key := range keys {
 		if (state.KeyID.IsNull() && key.Name == state.Name.ValueString()) || key.ID == state.KeyID.ValueString() {
 			if found != nil {

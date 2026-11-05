@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -21,7 +21,7 @@ import (
 )
 
 type keysetResource struct {
-	client controlClient
+	client manageClient
 }
 
 var (
@@ -111,7 +111,7 @@ func (r *keysetResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	created, err := r.client.CreateZeroKMSKeyset(ctx, control.CreateZeroKMSKeysetOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
+	created, err := r.client.CreateZeroKMSKeyset(ctx, manage.CreateZeroKMSKeysetOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot create keyset", operationError(err)+" A failed response can follow a completed write. Inspect inventory and import the keyset before retrying if it already exists.")
 		return
@@ -162,7 +162,7 @@ func (r *keysetResource) Update(ctx context.Context, req resource.UpdateRequest,
 // on a write error. A failed operation is never silently retried or suppressed.
 func (r *keysetResource) applyChanges(ctx context.Context, plan, current keysetModel, state *tfsdk.State) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
-	var opts control.ModifyZeroKMSKeysetOptions
+	var opts manage.ModifyZeroKMSKeysetOptions
 	if !plan.Name.Equal(current.Name) {
 		name := plan.Name.ValueString()
 		opts.Name = &name
@@ -193,7 +193,7 @@ func (r *keysetResource) applyChanges(ctx context.Context, plan, current keysetM
 	if !diagnostics.HasError() && (opts.Name != nil || opts.Description != nil) {
 		if err := r.client.ModifyZeroKMSKeyset(ctx, current.ID.ValueString(), opts); err != nil {
 			detail := operationError(err)
-			if errors.Is(err, control.ErrForbidden) {
+			if errors.Is(err, manage.ErrForbidden) {
 				detail = "CipherStash denied the metadata update. Check whether the keyset is disabled, as well as the Admin credential's permissions. Metadata changes require an enabled keyset."
 			}
 
@@ -296,8 +296,8 @@ func (r *keysetResource) ImportState(ctx context.Context, req resource.ImportSta
 	resp.Diagnostics.Append(resp.State.Set(ctx, keysetModelFrom(*found))...)
 }
 
-func (r *keysetResource) findKeyset(ctx context.Context, id string) (*control.ZeroKMSKeyset, error) {
-	keysets, err := r.client.ListZeroKMSKeysets(ctx, control.ListZeroKMSKeysetsOptions{ShowDisabled: true})
+func (r *keysetResource) findKeyset(ctx context.Context, id string) (*manage.ZeroKMSKeyset, error) {
+	keysets, err := r.client.ListZeroKMSKeysets(ctx, manage.ListZeroKMSKeysetsOptions{ShowDisabled: true})
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +311,7 @@ func (r *keysetResource) findKeyset(ctx context.Context, id string) (*control.Ze
 	return nil, nil
 }
 
-func keysetModelFrom(keyset control.ZeroKMSKeyset) keysetModel {
+func keysetModelFrom(keyset manage.ZeroKMSKeyset) keysetModel {
 	return keysetModel{
 		ID: types.StringValue(keyset.ID), Name: types.StringValue(keyset.Name), Description: types.StringValue(keyset.Description),
 		Enabled: types.BoolValue(!keyset.IsDisabled), IsDefault: types.BoolValue(keyset.IsDefault),

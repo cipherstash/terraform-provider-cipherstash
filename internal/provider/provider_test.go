@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -162,7 +162,7 @@ func TestProviderCredentialPrecedence(t *testing.T) {
 
 func TestProviderInstancesKeepSeparateAuthentication(t *testing.T) {
 	f := newServiceFixture(t)
-	f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "application"}}
+	f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "application"}}
 	rt := fixtureTransport(t, "admin", f.ServeHTTP, func(claims map[string]any) {
 		claims["exp"] = time.Now().Add(30 * time.Second).Unix()
 	})
@@ -181,7 +181,7 @@ func TestProviderInstancesKeepSeparateAuthentication(t *testing.T) {
 	for _, configured := range []provider.ConfigureResponse{l, r} {
 		api, err := clientFromProviderData(configured.ResourceData)
 		require.NoError(t, err)
-		clients, err := api.ListZeroKMSClients(context.Background(), control.ListZeroKMSClientsOptions{})
+		clients, err := api.ListZeroKMSClients(context.Background(), manage.ListZeroKMSClientsOptions{})
 		require.NoError(t, err)
 		require.Len(t, clients, 1)
 		require.Equal(t, clientID, clients[0].ID)
@@ -191,11 +191,11 @@ func TestProviderInstancesKeepSeparateAuthentication(t *testing.T) {
 	require.NoError(t, err)
 	closed, err := clientFromProviderData(l.ResourceData)
 	require.NoError(t, err)
-	_, err = closed.ListZeroKMSClients(context.Background(), control.ListZeroKMSClientsOptions{})
+	_, err = closed.ListZeroKMSClients(context.Background(), manage.ListZeroKMSClientsOptions{})
 	require.ErrorIs(t, err, context.Canceled, "stopped provider still refreshes tokens")
 	api, err := clientFromProviderData(r.ResourceData)
 	require.NoError(t, err)
-	clients, err := api.ListZeroKMSClients(context.Background(), control.ListZeroKMSClientsOptions{})
+	clients, err := api.ListZeroKMSClients(context.Background(), manage.ListZeroKMSClientsOptions{})
 	require.NoError(t, err, "stopping one provider closed the other session")
 	require.Len(t, clients, 1)
 	require.Equal(t, clientID, clients[0].ID)

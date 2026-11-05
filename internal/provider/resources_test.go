@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -23,63 +23,63 @@ const (
 
 // Unimplemented operations panic via the embedded interface: an unexpected
 // mutation during refresh/import must fail, not silently succeed.
-type testControl struct {
-	controlClient
-	actors        func(control.ListCTSActorsOptions) (control.CTSActorPage, error)
-	keys          func() ([]control.CTSAccessKeyMetadata, error)
-	clients       func() ([]control.ZeroKMSClient, error)
+type testManage struct {
+	manageClient
+	actors        func(manage.ListCTSActorsOptions) (manage.CTSActorPage, error)
+	keys          func() ([]manage.CTSAccessKeyMetadata, error)
+	clients       func() ([]manage.ZeroKMSClient, error)
 	deleteActor   func(string) error
 	deleteClient  func(string) error
 	grant         func(string, string) error
 	revoke        func(string, string) error
-	createKeyset  func(control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error)
-	keysets       func(control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error)
-	modifyKeyset  func(string, control.ModifyZeroKMSKeysetOptions) error
+	createKeyset  func(manage.CreateZeroKMSKeysetOptions) (*manage.CreatedZeroKMSKeyset, error)
+	keysets       func(manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error)
+	modifyKeyset  func(string, manage.ModifyZeroKMSKeysetOptions) error
 	enableKeyset  func(string) error
 	disableKeyset func(string) error
 }
 
-func (c testControl) ListCTSActors(_ context.Context, opts control.ListCTSActorsOptions) (control.CTSActorPage, error) {
+func (c testManage) ListCTSActors(_ context.Context, opts manage.ListCTSActorsOptions) (manage.CTSActorPage, error) {
 	return c.actors(opts)
 }
 
-func (c testControl) ListCTSAccessKeys(context.Context) ([]control.CTSAccessKeyMetadata, error) {
+func (c testManage) ListCTSAccessKeys(context.Context) ([]manage.CTSAccessKeyMetadata, error) {
 	return c.keys()
 }
 
-func (c testControl) ListZeroKMSClients(context.Context, control.ListZeroKMSClientsOptions) ([]control.ZeroKMSClient, error) {
+func (c testManage) ListZeroKMSClients(context.Context, manage.ListZeroKMSClientsOptions) ([]manage.ZeroKMSClient, error) {
 	return c.clients()
 }
-func (c testControl) DeleteCTSActor(_ context.Context, id string) error { return c.deleteActor(id) }
-func (c testControl) DeleteZeroKMSClient(_ context.Context, id string) error {
+func (c testManage) DeleteCTSActor(_ context.Context, id string) error { return c.deleteActor(id) }
+func (c testManage) DeleteZeroKMSClient(_ context.Context, id string) error {
 	return c.deleteClient(id)
 }
 
-func (c testControl) GrantZeroKMSKeyset(_ context.Context, keysetID, clientID string) error {
+func (c testManage) GrantZeroKMSKeyset(_ context.Context, keysetID, clientID string) error {
 	return c.grant(keysetID, clientID)
 }
 
-func (c testControl) RevokeZeroKMSKeyset(_ context.Context, keysetID, clientID string) error {
+func (c testManage) RevokeZeroKMSKeyset(_ context.Context, keysetID, clientID string) error {
 	return c.revoke(keysetID, clientID)
 }
 
-func (c testControl) CreateZeroKMSKeyset(_ context.Context, opts control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error) {
+func (c testManage) CreateZeroKMSKeyset(_ context.Context, opts manage.CreateZeroKMSKeysetOptions) (*manage.CreatedZeroKMSKeyset, error) {
 	return c.createKeyset(opts)
 }
 
-func (c testControl) ListZeroKMSKeysets(_ context.Context, opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
+func (c testManage) ListZeroKMSKeysets(_ context.Context, opts manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error) {
 	return c.keysets(opts)
 }
 
-func (c testControl) ModifyZeroKMSKeyset(_ context.Context, id string, opts control.ModifyZeroKMSKeysetOptions) error {
+func (c testManage) ModifyZeroKMSKeyset(_ context.Context, id string, opts manage.ModifyZeroKMSKeysetOptions) error {
 	return c.modifyKeyset(id, opts)
 }
 
-func (c testControl) EnableZeroKMSKeyset(_ context.Context, id string) error {
+func (c testManage) EnableZeroKMSKeyset(_ context.Context, id string) error {
 	return c.enableKeyset(id)
 }
 
-func (c testControl) DisableZeroKMSKeyset(_ context.Context, id string) error {
+func (c testManage) DisableZeroKMSKeyset(_ context.Context, id string) error {
 	return c.disableKeyset(id)
 }
 
@@ -114,20 +114,20 @@ func savedClient() clientModel {
 }
 
 func TestActorRefreshPaginationAndSecrets(t *testing.T) {
-	r := &actorResource{client: testControl{
-		actors: func(opts control.ListCTSActorsOptions) (control.CTSActorPage, error) {
+	r := &actorResource{client: testManage{
+		actors: func(opts manage.ListCTSActorsOptions) (manage.CTSActorPage, error) {
 			switch opts.Cursor {
 			case "":
-				return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-unrelated", Name: "unrelated"}}, NextCursor: "page2"}, nil
+				return manage.CTSActorPage{Items: []manage.CTSActor{{ID: "app-unrelated", Name: "unrelated"}}, NextCursor: "page2"}, nil
 			case "page2":
-				return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-actor", Name: "renamed", Kind: "agent", CreatedAt: "2026-10-26T00:00:00Z"}}}, nil
+				return manage.CTSActorPage{Items: []manage.CTSActor{{ID: "app-actor", Name: "renamed", Kind: "agent", CreatedAt: "2026-10-26T00:00:00Z"}}}, nil
 			default:
 				require.FailNowf(t, "unexpected cursor", "%q", opts.Cursor)
-				return control.CTSActorPage{}, nil
+				return manage.CTSActorPage{}, nil
 			}
 		},
-		keys: func() ([]control.CTSAccessKeyMetadata, error) {
-			return []control.CTSAccessKeyMetadata{{ID: "other-key", Name: "renamed", Role: "member"}, {ID: "key-1", Name: "renamed", Role: "control"}}, nil
+		keys: func() ([]manage.CTSAccessKeyMetadata, error) {
+			return []manage.CTSAccessKeyMetadata{{ID: "other-key", Name: "renamed", Role: "member"}, {ID: "key-1", Name: "renamed", Role: "control"}}, nil
 		},
 	}}
 	before := savedActor()
@@ -148,20 +148,20 @@ func TestActorRefreshPaginationAndSecrets(t *testing.T) {
 func TestActorRefreshMissingAndFailedReads(t *testing.T) {
 	for _, scenario := range []string{"absent", "listing failure", "missing key", "key failure", "cursor cycle"} {
 		t.Run(scenario, func(t *testing.T) {
-			r := &actorResource{client: testControl{
-				actors: func(control.ListCTSActorsOptions) (control.CTSActorPage, error) {
+			r := &actorResource{client: testManage{
+				actors: func(manage.ListCTSActorsOptions) (manage.CTSActorPage, error) {
 					switch scenario {
 					case "absent":
-						return control.CTSActorPage{}, nil
+						return manage.CTSActorPage{}, nil
 					case "listing failure":
-						return control.CTSActorPage{}, control.ErrForbidden
+						return manage.CTSActorPage{}, manage.ErrForbidden
 					case "cursor cycle":
-						return control.CTSActorPage{NextCursor: "repeat"}, nil
+						return manage.CTSActorPage{NextCursor: "repeat"}, nil
 					default:
-						return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-actor", Name: "before"}}}, nil
+						return manage.CTSActorPage{Items: []manage.CTSActor{{ID: "app-actor", Name: "before"}}}, nil
 					}
 				},
-				keys: func() ([]control.CTSAccessKeyMetadata, error) {
+				keys: func() ([]manage.CTSAccessKeyMetadata, error) {
 					if scenario == "key failure" {
 						return nil, errors.New("upstream body test-secret-not-a-credential")
 					}
@@ -185,12 +185,12 @@ func TestActorRefreshMissingAndFailedReads(t *testing.T) {
 }
 
 func TestActorImportDoesNotInventSecret(t *testing.T) {
-	r := &actorResource{client: testControl{
-		actors: func(control.ListCTSActorsOptions) (control.CTSActorPage, error) {
-			return control.CTSActorPage{Items: []control.CTSActor{{ID: "app-imported", Name: "imported", Kind: "app", CreatedAt: "today"}}}, nil
+	r := &actorResource{client: testManage{
+		actors: func(manage.ListCTSActorsOptions) (manage.CTSActorPage, error) {
+			return manage.CTSActorPage{Items: []manage.CTSActor{{ID: "app-imported", Name: "imported", Kind: "app", CreatedAt: "today"}}}, nil
 		},
-		keys: func() ([]control.CTSAccessKeyMetadata, error) {
-			return []control.CTSAccessKeyMetadata{{ID: "key-imported", Name: "imported", Role: "member"}}, nil
+		keys: func() ([]manage.CTSAccessKeyMetadata, error) {
+			return []manage.CTSAccessKeyMetadata{{ID: "key-imported", Name: "imported", Role: "member"}}, nil
 		},
 	}}
 	imported := resource.ImportStateResponse{State: resourceState(t, r, actorModel{})}
@@ -209,16 +209,16 @@ func TestActorImportDoesNotInventSecret(t *testing.T) {
 func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
 	for _, scenario := range []string{"external grants", "missing tracked grant", "absent", "failed list"} {
 		t.Run(scenario, func(t *testing.T) {
-			r := &clientResource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
+			r := &clientResource{client: testManage{clients: func() ([]manage.ZeroKMSClient, error) {
 				switch scenario {
 				case "absent":
 					return nil, nil
 				case "failed list":
-					return nil, control.ErrAuthentication
+					return nil, manage.ErrAuthentication
 				case "missing tracked grant":
-					return []control.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID}}}, nil
+					return []manage.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID}}}, nil
 				default:
-					return []control.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID, keysetID}}}, nil
+					return []manage.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID, keysetID}}}, nil
 				}
 			}}}
 			before := savedClient()
@@ -262,12 +262,12 @@ func TestClientImportPreservesHistoricalMetadata(t *testing.T) {
 		{"missing object", clientID, nil, "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &clientResource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
+			r := &clientResource{client: testManage{clients: func() ([]manage.ZeroKMSClient, error) {
 				if tc.name == "missing object" {
 					return nil, nil
 				}
 
-				return []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "imported description", KeysetIDs: tc.grants}}, nil
+				return []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "imported description", KeysetIDs: tc.grants}}, nil
 			}}}
 			resp := resource.ImportStateResponse{State: resourceState(t, r, clientModel{})}
 			r.ImportState(context.Background(), resource.ImportStateRequest{ID: tc.id}, &resp)
@@ -287,12 +287,12 @@ func TestClientImportPreservesHistoricalMetadata(t *testing.T) {
 }
 
 func TestDeleteAlreadyAbsentAndFailures(t *testing.T) {
-	for _, err := range []error{nil, fmt.Errorf("wrapped: %w", control.ErrNotFound), control.ErrForbidden} {
-		actor := &actorResource{client: testControl{deleteActor: func(id string) error {
+	for _, err := range []error{nil, fmt.Errorf("wrapped: %w", manage.ErrNotFound), manage.ErrForbidden} {
+		actor := &actorResource{client: testManage{deleteActor: func(id string) error {
 			require.Equal(t, "app-actor", id, "wrong actor deleted")
 			return err
 		}}}
-		client := &clientResource{client: testControl{deleteClient: func(id string) error {
+		client := &clientResource{client: testManage{deleteClient: func(id string) error {
 			require.Equal(t, clientID, id, "wrong client deleted")
 			return err
 		}}}
@@ -303,7 +303,7 @@ func TestDeleteAlreadyAbsentAndFailures(t *testing.T) {
 			state := resourceState(t, tc.r, tc.model)
 			resp := resource.DeleteResponse{State: state}
 			tc.r.Delete(context.Background(), resource.DeleteRequest{State: state}, &resp)
-			require.Equal(t, errors.Is(err, control.ErrForbidden), resp.Diagnostics.HasError(), "wrong delete result: %v", resp.Diagnostics)
+			require.Equal(t, errors.Is(err, manage.ErrForbidden), resp.Diagnostics.HasError(), "wrong delete result: %v", resp.Diagnostics)
 		}
 	}
 }
@@ -311,19 +311,19 @@ func TestDeleteAlreadyAbsentAndFailures(t *testing.T) {
 func TestClientDataSourceRead(t *testing.T) {
 	for _, scenario := range []string{"multiple grants", "no grants", "missing", "failed list", "invalid id"} {
 		t.Run(scenario, func(t *testing.T) {
-			d := &clientDataSource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
+			d := &clientDataSource{client: testManage{clients: func() ([]manage.ZeroKMSClient, error) {
 				if scenario == "failed list" {
 					return nil, errors.New("upstream body test-secret-not-a-credential")
 				}
 
-				clients := []control.ZeroKMSClient{{ID: "44444444-4444-4444-8444-444444444444", Name: "unrelated", KeysetIDs: []string{tenantKeysetID}}}
+				clients := []manage.ZeroKMSClient{{ID: "44444444-4444-4444-8444-444444444444", Name: "unrelated", KeysetIDs: []string{tenantKeysetID}}}
 				if scenario != "missing" {
 					grants := []string{tenantKeysetID, keysetID}
 					if scenario == "no grants" {
 						grants = []string{}
 					}
 
-					clients = append(clients, control.ZeroKMSClient{ID: clientID, Name: "existing", Description: "current description", KeysetIDs: grants})
+					clients = append(clients, manage.ZeroKMSClient{ID: clientID, Name: "existing", Description: "current description", KeysetIDs: grants})
 				}
 
 				return clients, nil
@@ -385,10 +385,10 @@ func TestKeysetGrantCreateStateOnFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			attempted := false
-			r := &keysetGrantResource{client: testControl{
-				clients: func() ([]control.ZeroKMSClient, error) {
+			r := &keysetGrantResource{client: testManage{
+				clients: func() ([]manage.ZeroKMSClient, error) {
 					if (!attempted && tc.preflightError) || (attempted && tc.readError) {
-						return nil, control.ErrForbidden
+						return nil, manage.ErrForbidden
 					}
 
 					grants := []string{tenantKeysetID}
@@ -396,7 +396,7 @@ func TestKeysetGrantCreateStateOnFailure(t *testing.T) {
 						grants = append(grants, keysetID)
 					}
 
-					return []control.ZeroKMSClient{{ID: clientID, KeysetIDs: grants}}, nil
+					return []manage.ZeroKMSClient{{ID: clientID, KeysetIDs: grants}}, nil
 				},
 				grant: func(keyset, client string) error {
 					require.False(t, attempted || tc.alreadyPresent || tc.preflightError, "unexpected grant mutation")
@@ -430,20 +430,20 @@ func TestKeysetGrantCreateStateOnFailure(t *testing.T) {
 func TestKeysetGrantRefreshAndImport(t *testing.T) {
 	for _, scenario := range []string{"present", "missing grant", "missing client", "failed list"} {
 		t.Run(scenario, func(t *testing.T) {
-			r := &keysetGrantResource{client: testControl{clients: func() ([]control.ZeroKMSClient, error) {
+			r := &keysetGrantResource{client: testManage{clients: func() ([]manage.ZeroKMSClient, error) {
 				if scenario == "failed list" {
-					return nil, control.ErrAuthentication
+					return nil, manage.ErrAuthentication
 				}
 
 				// A grant to a different client must never satisfy this pair.
-				clients := []control.ZeroKMSClient{{ID: "44444444-4444-4444-8444-444444444444", KeysetIDs: []string{keysetID}}}
+				clients := []manage.ZeroKMSClient{{ID: "44444444-4444-4444-8444-444444444444", KeysetIDs: []string{keysetID}}}
 				if scenario != "missing client" {
 					grants := []string{tenantKeysetID}
 					if scenario == "present" {
 						grants = append(grants, keysetID)
 					}
 
-					clients = append(clients, control.ZeroKMSClient{ID: clientID, KeysetIDs: grants})
+					clients = append(clients, manage.ZeroKMSClient{ID: clientID, KeysetIDs: grants})
 				}
 
 				return clients, nil
@@ -487,10 +487,10 @@ func TestKeysetGrantDeleteRequiresConfirmedAbsence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			attempted := false
-			r := &keysetGrantResource{client: testControl{
-				clients: func() ([]control.ZeroKMSClient, error) {
+			r := &keysetGrantResource{client: testManage{
+				clients: func() ([]manage.ZeroKMSClient, error) {
 					if (!attempted && tc.preflightError) || (attempted && tc.readError) {
-						return nil, control.ErrForbidden
+						return nil, manage.ErrForbidden
 					}
 
 					grants := []string{tenantKeysetID}
@@ -498,7 +498,7 @@ func TestKeysetGrantDeleteRequiresConfirmedAbsence(t *testing.T) {
 						grants = append(grants, keysetID)
 					}
 
-					return []control.ZeroKMSClient{{ID: clientID, KeysetIDs: grants}}, nil
+					return []manage.ZeroKMSClient{{ID: clientID, KeysetIDs: grants}}, nil
 				},
 				revoke: func(keyset, client string) error {
 					require.False(t, attempted || tc.absent || tc.preflightError, "unexpected revoke mutation")
@@ -528,17 +528,17 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 	for _, scenario := range []string{"enabled", "disabled", "create failed", "disable failed", "read failed", "not visible"} {
 		t.Run(scenario, func(t *testing.T) {
 			var result resource.CreateResponse
-			remote := control.ZeroKMSKeyset{ID: keysetID, Name: "created", Description: "creation description"}
-			r := &keysetResource{client: testControl{
-				createKeyset: func(opts control.CreateZeroKMSKeysetOptions) (*control.CreatedZeroKMSKeyset, error) {
+			remote := manage.ZeroKMSKeyset{ID: keysetID, Name: "created", Description: "creation description"}
+			r := &keysetResource{client: testManage{
+				createKeyset: func(opts manage.CreateZeroKMSKeysetOptions) (*manage.CreatedZeroKMSKeyset, error) {
 					require.Equal(t, "created", opts.Name)
 					require.Equal(t, "creation description", opts.Description)
 					require.Nil(t, opts.Client, "keyset creation must not create a client")
 					if scenario == "create failed" {
-						return nil, control.ErrConflict
+						return nil, manage.ErrConflict
 					}
 
-					return &control.CreatedZeroKMSKeyset{ZeroKMSKeyset: remote}, nil
+					return &manage.CreatedZeroKMSKeyset{ZeroKMSKeyset: remote}, nil
 				},
 				disableKeyset: func(id string) error {
 					var saved keysetModel
@@ -546,24 +546,24 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 					require.Equal(t, keysetID, saved.ID.ValueString(), "disable began before the created identity was saved")
 					require.Equal(t, keysetID, id)
 					if scenario == "disable failed" {
-						return control.ErrForbidden
+						return manage.ErrForbidden
 					}
 
 					remote.IsDisabled = true
 
 					return nil
 				},
-				keysets: func(opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
+				keysets: func(opts manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error) {
 					require.True(t, opts.ShowDisabled, "disabled keysets must remain visible during reconciliation")
 					if scenario == "read failed" {
-						return nil, control.ErrAuthentication
+						return nil, manage.ErrAuthentication
 					}
 
 					if scenario == "not visible" {
 						return nil, nil
 					}
 
-					return []control.ZeroKMSKeyset{remote}, nil
+					return []manage.ZeroKMSKeyset{remote}, nil
 				},
 			}}
 			plan := resourceState(t, r, keysetModel{ID: types.StringUnknown(), Name: types.StringValue("created"), Description: types.StringValue("creation description"), Enabled: types.BoolValue(scenario == "enabled"), IsDefault: types.BoolUnknown()})
@@ -588,14 +588,14 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 	for _, scenario := range []string{"disabled", "missing", "failed list"} {
 		t.Run(scenario, func(t *testing.T) {
-			r := &keysetResource{client: testControl{keysets: func(opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
+			r := &keysetResource{client: testManage{keysets: func(opts manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error) {
 				if scenario == "failed list" {
-					return nil, control.ErrForbidden
+					return nil, manage.ErrForbidden
 				}
 
-				keysets := []control.ZeroKMSKeyset{{ID: tenantKeysetID, Name: "unrelated", Description: "unrelated"}}
+				keysets := []manage.ZeroKMSKeyset{{ID: tenantKeysetID, Name: "unrelated", Description: "unrelated"}}
 				if opts.ShowDisabled && scenario != "missing" {
-					keysets = append(keysets, control.ZeroKMSKeyset{ID: keysetID, Name: "renamed", Description: "new description", IsDisabled: true, IsDefault: true})
+					keysets = append(keysets, manage.ZeroKMSKeyset{ID: keysetID, Name: "renamed", Description: "new description", IsDisabled: true, IsDefault: true})
 				}
 
 				return keysets, nil
@@ -635,15 +635,15 @@ func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 func TestKeysetUpdatePreservesPartialSuccess(t *testing.T) {
 	for _, scenario := range []string{"success", "modify failed", "disable failed", "read failed", "write not visible"} {
 		t.Run(scenario, func(t *testing.T) {
-			remote := control.ZeroKMSKeyset{ID: keysetID, Name: "unchanged", Description: "old description"}
-			r := &keysetResource{client: testControl{
-				modifyKeyset: func(id string, opts control.ModifyZeroKMSKeysetOptions) error {
+			remote := manage.ZeroKMSKeyset{ID: keysetID, Name: "unchanged", Description: "old description"}
+			r := &keysetResource{client: testManage{
+				modifyKeyset: func(id string, opts manage.ModifyZeroKMSKeysetOptions) error {
 					require.Equal(t, keysetID, id)
 					require.Nil(t, opts.Name, "metadata update must only send the changed description")
 					require.NotNil(t, opts.Description)
 					require.Equal(t, "new description", *opts.Description)
 					if scenario == "modify failed" {
-						return control.ErrForbidden
+						return manage.ErrForbidden
 					}
 
 					remote.Description = *opts.Description
@@ -663,12 +663,12 @@ func TestKeysetUpdatePreservesPartialSuccess(t *testing.T) {
 
 					return nil
 				},
-				keysets: func(control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
+				keysets: func(manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error) {
 					if scenario == "read failed" {
-						return nil, control.ErrAuthentication
+						return nil, manage.ErrAuthentication
 					}
 
-					return []control.ZeroKMSKeyset{remote}, nil
+					return []manage.ZeroKMSKeyset{remote}, nil
 				},
 			}}
 			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("unchanged"), Description: types.StringValue("old description"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)})
@@ -695,18 +695,18 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 	for _, scenario := range []string{"enabled", "disabled", "missing", "preflight failed", "disable failed", "read failed", "still enabled"} {
 		t.Run(scenario, func(t *testing.T) {
 			attempted := false
-			r := &keysetResource{client: testControl{
-				keysets: func(opts control.ListZeroKMSKeysetsOptions) ([]control.ZeroKMSKeyset, error) {
+			r := &keysetResource{client: testManage{
+				keysets: func(opts manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error) {
 					require.True(t, opts.ShowDisabled, "destroy must include disabled keysets")
 					if scenario == "preflight failed" || (attempted && scenario == "read failed") {
-						return nil, control.ErrForbidden
+						return nil, manage.ErrForbidden
 					}
 
 					if scenario == "missing" {
 						return nil, nil
 					}
 
-					return []control.ZeroKMSKeyset{{ID: keysetID, Name: "retained", Description: "retained description", IsDisabled: scenario == "disabled" || (attempted && scenario != "still enabled")}}, nil
+					return []manage.ZeroKMSKeyset{{ID: keysetID, Name: "retained", Description: "retained description", IsDisabled: scenario == "disabled" || (attempted && scenario != "still enabled")}}, nil
 				},
 				disableKeyset: func(id string) error {
 					require.False(t, attempted, "unexpected disable mutation")
@@ -714,7 +714,7 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 					require.Equal(t, keysetID, id)
 					attempted = true
 					if scenario == "disable failed" {
-						return control.ErrNotFound
+						return manage.ErrNotFound
 					}
 
 					return nil

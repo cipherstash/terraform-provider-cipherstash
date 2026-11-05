@@ -31,7 +31,7 @@ Lint is stricter than `check`: it formats with gofumpt rather than gofmt, requir
 
 ## Provider conventions
 
-- `internal/provider` imports `pkg/stack/manage` as `control`. Resources call it only through the `controlClient` interface in `provider.go`; add any new manage operation there.
+- Resources call `pkg/stack/manage` only through the `manageClient` interface in `provider.go`; add any new manage operation there.
 - Build diagnostic details from `operationError(err)` plus fixed operation context. Never put `err.Error()` from `manage` or `auth` into a diagnostic: upstream bodies can contain submitted secrets. Failure tests assert diagnostics never contain `fixture-upstream-secret`.
 - Every attribute has a plain `Description` (no `MarkdownDescription`). Type names carry `cts_` or `zerokms_` for the owning service. Arguments the API cannot update use `RequiresReplace`, and Update returns a "provider bug" error.
 - Mark credentials `Sensitive`: the resource attributes `access_key` and `client_key`, and the provider argument `client_access_key`. Resource secrets are still stored in state and saved plans, and provider inputs can appear in saved plans; keep the README and descriptions saying so.
@@ -46,7 +46,7 @@ Lint is stricter than `check`: it formats with gofumpt rather than gofmt, requir
 
 ## Tests
 
-- `cli_test.go` runs Terraform against the in-process provider and fails unless `terraform` on `PATH` is exactly the pinned version. `crud_test.go`, `failures_test.go` and `provider_test.go` call the provider directly; `crud_test.go` holds the token-signing fake. `resources_test.go` injects client results through `testControl`, which embeds `controlClient`, so calling an unstubbed method (such as a write during refresh) panics.
+- `cli_test.go` runs Terraform against the in-process provider and fails unless `terraform` on `PATH` is exactly the pinned version. `crud_test.go`, `failures_test.go` and `provider_test.go` call the provider directly; `crud_test.go` holds the token-signing fake. `resources_test.go` injects client results through `testManage`, which embeds `manageClient`, so calling an unstubbed method (such as a write during refresh) panics.
 - Direct tests build on `newServiceFixture(t)` with `fixtureClient(t, fixtureTransport(t, "admin", f.ServeHTTP))`. Inject failures with `f.faults` (a fault that never fires fails the test) and assert `f.mutations` is empty for refresh and import.
 - Tests in `internal/provider` must not call `t.Parallel()`: they replace the process-wide `http.DefaultTransport`.
 - When you change a write path, extend the failure and recovery cases in `failures_test.go`, `resources_test.go` and `cli_test.go`.

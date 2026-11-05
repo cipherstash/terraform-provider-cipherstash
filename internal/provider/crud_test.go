@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/auth"
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	frameworkprovider "github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
@@ -126,7 +126,7 @@ func configureFixture(t *testing.T, p *Provider, rt http.RoundTripper, cfg provi
 	return resp
 }
 
-func fixtureClient(t *testing.T, rt http.RoundTripper) *control.Client {
+func fixtureClient(t *testing.T, rt http.RoundTripper) *manage.Client {
 	t.Helper()
 	crn, err := auth.ParseCRN(testCRN)
 	require.NoError(t, err)
@@ -134,7 +134,7 @@ func fixtureClient(t *testing.T, rt http.RoundTripper) *control.Client {
 	require.NoError(t, err)
 	tokens, err := auth.NewTokenSource(t.Context(), crn, key, auth.WithTransport(rt))
 	require.NoError(t, err)
-	client, err := control.NewClient(crn, tokens, control.WithTransport(rt))
+	client, err := manage.NewClient(crn, tokens, manage.WithTransport(rt))
 	require.NoError(t, err)
 
 	return client
@@ -147,11 +147,11 @@ func TestActorCreateSavesSecretBeforeMetadataRead(t *testing.T) {
 			rt := fixtureTransport(t, "admin", func(w http.ResponseWriter, req *http.Request) {
 				switch req.URL.Path {
 				case "/api/actors":
-					var input control.CreateCTSActorOptions
+					var input manage.CreateCTSActorOptions
 					assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 					assert.Equal(t, "test-create", input.Name)
-					assert.Equal(t, control.CTSActorKind("agent"), input.Kind)
-					assert.Equal(t, control.CTSRole("control"), input.Role)
+					assert.Equal(t, manage.CTSActorKind("agent"), input.Kind)
+					assert.Equal(t, manage.CTSRole("control"), input.Role)
 					if assert.NotNil(t, input.TokenExpiry) {
 						assert.Equal(t, int64(1234), *input.TokenExpiry)
 					}
@@ -242,17 +242,17 @@ func TestProviderOwnsAuthenticationAcrossCallsAndCancelsOnReconfigureAndStop(t *
 	noErrors(t, configured.Diagnostics)
 	api, err := clientFromProviderData(configured.ResourceData)
 	require.NoError(t, err)
-	_, err = api.ListZeroKMSClients(t.Context(), control.ListZeroKMSClientsOptions{})
+	_, err = api.ListZeroKMSClients(t.Context(), manage.ListZeroKMSClientsOptions{})
 	require.NoError(t, err, "Configure released authentication too early")
 	configured = configureFixture(t, p, rt, cfg)
 	noErrors(t, configured.Diagnostics)
-	_, err = api.ListZeroKMSClients(t.Context(), control.ListZeroKMSClientsOptions{})
+	_, err = api.ListZeroKMSClients(t.Context(), manage.ListZeroKMSClientsOptions{})
 	require.ErrorIs(t, err, context.Canceled, "reconfiguration did not cancel old authentication")
 	api, err = clientFromProviderData(configured.ResourceData)
 	require.NoError(t, err)
 	_, err = Protocol6(p).StopProvider(context.Background(), &tfprotov6.StopProviderRequest{})
 	require.NoError(t, err)
-	_, err = api.ListZeroKMSClients(t.Context(), control.ListZeroKMSClientsOptions{})
+	_, err = api.ListZeroKMSClients(t.Context(), manage.ListZeroKMSClientsOptions{})
 	require.ErrorIs(t, err, context.Canceled, "StopProvider did not cancel authentication")
 }
 
@@ -297,9 +297,9 @@ func TestProviderDefersAuthorizationToServices(t *testing.T) {
 				before := resourceState(t, tc.r, tc.model)
 				read := resource.ReadResponse{State: before}
 				tc.r.Read(context.Background(), resource.ReadRequest{State: before}, &read)
-				wantError := control.ErrForbidden
+				wantError := manage.ErrForbidden
 				if status == http.StatusUnauthorized {
-					wantError = control.ErrAuthentication
+					wantError = manage.ErrAuthentication
 				}
 
 				require.True(t, read.Diagnostics.HasError(), "%v", read.Diagnostics)
@@ -375,21 +375,21 @@ func TestKeysetGrantSDKCRUDPreservesOtherGrants(t *testing.T) {
 
 func TestKeysetSDKCRUDDisablesAndRetains(t *testing.T) {
 	var mu sync.Mutex
-	var remote *control.ZeroKMSKeyset
-	unrelated := control.ZeroKMSKeyset{ID: tenantKeysetID, Name: "worker-owned", Description: "unchanged", IsDefault: true}
+	var remote *manage.ZeroKMSKeyset
+	unrelated := manage.ZeroKMSKeyset{ID: tenantKeysetID, Name: "worker-owned", Description: "unchanged", IsDefault: true}
 	rt := fixtureTransport(t, "admin", func(w http.ResponseWriter, req *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 
 		switch req.URL.Path {
 		case "/create-keyset":
-			var input control.CreateZeroKMSKeysetOptions
+			var input manage.CreateZeroKMSKeysetOptions
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 			assert.Nil(t, input.Client, "keyset resource must not create a client")
-			remote = &control.ZeroKMSKeyset{ID: keysetID, Name: input.Name, Description: input.Description}
+			remote = &manage.ZeroKMSKeyset{ID: keysetID, Name: input.Name, Description: input.Description}
 			assert.NoError(t, json.NewEncoder(w).Encode(keysetJSON(*remote)))
 		case "/list-keysets":
-			var input control.ListZeroKMSKeysetsOptions
+			var input manage.ListZeroKMSKeysetsOptions
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 			keysets := []map[string]any{keysetJSON(unrelated)}
 			if remote != nil && (input.ShowDisabled || !remote.IsDisabled) {
@@ -400,7 +400,7 @@ func TestKeysetSDKCRUDDisablesAndRetains(t *testing.T) {
 		case "/modify-keyset", "/enable-keyset", "/disable-keyset":
 			var input struct {
 				KeysetID string `json:"keyset_id"`
-				control.ModifyZeroKMSKeysetOptions
+				manage.ModifyZeroKMSKeysetOptions
 			}
 			assert.NoError(t, json.NewDecoder(req.Body).Decode(&input))
 			if remote == nil || input.KeysetID != keysetID {

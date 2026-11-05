@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/terraform-exec/tfexec"
@@ -181,7 +181,7 @@ resource "cipherstash_zerokms_keyset" "app" {
 					}
 
 					id = current
-					i := slices.IndexFunc(f.keysets, func(k control.ZeroKMSKeyset) bool { return k.ID == id })
+					i := slices.IndexFunc(f.keysets, func(k manage.ZeroKMSKeyset) bool { return k.ID == id })
 					if i < 0 || f.keysets[i].IsDisabled == enabled || f.keysets[i].Description != description || f.keysets[i].Name != "application-"+description {
 						return fmt.Errorf("keyset inventory does not match configuration")
 					}
@@ -310,8 +310,8 @@ func TestCLIImports(t *testing.T) {
 			switch kind {
 			case "actor":
 				id, address = "app-imported", "cipherstash_cts_actor.app"
-				f.actors = []control.CTSActor{{ID: id, Name: "imported", Kind: "app", CreatedAt: fixtureTimestamp}}
-				f.keys = []control.CTSAccessKeyMetadata{{ID: "key-" + id, Name: "imported", Role: "member", CreatedAt: fixtureTimestamp}}
+				f.actors = []manage.CTSActor{{ID: id, Name: "imported", Kind: "app", CreatedAt: fixtureTimestamp}}
+				f.keys = []manage.CTSAccessKeyMetadata{{ID: "key-" + id, Name: "imported", Role: "member", CreatedAt: fixtureTimestamp}}
 				config = `resource "cipherstash_cts_actor" "app" { name = "imported" }`
 				checks = []statecheck.StateCheck{
 					statecheck.ExpectKnownValue(address, tfjsonpath.New("access_key"), knownvalue.Null()),
@@ -319,7 +319,7 @@ func TestCLIImports(t *testing.T) {
 				}
 			case "client", "client-zero-grants", "client-many-grants", "client-legacy-pair", "client-legacy-absent-grant":
 				id, address = clientID, "cipherstash_zerokms_client.app"
-				f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+				f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 				config = "resource \"cipherstash_zerokms_client\" \"app\" {\n name = \"imported\"\n description = \"existing\"\n}"
 				var historical knownvalue.Check = knownvalue.Null()
 				switch kind {
@@ -351,7 +351,7 @@ func TestCLIImports(t *testing.T) {
 				checks = []statecheck.StateCheck{statecheck.ExpectKnownValue(address, tfjsonpath.New("enabled"), knownvalue.Bool(false))}
 			case "keyset_grant":
 				id, address = clientID+"/"+tenantKeysetID, "cipherstash_zerokms_keyset_grant.app"
-				f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "external", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+				f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "external", KeysetIDs: []string{keysetID, tenantKeysetID}}}
 				config = fmt.Sprintf("resource \"cipherstash_zerokms_keyset_grant\" \"app\" {\n client_id = %q\n keyset_id = %q\n}", clientID, tenantKeysetID)
 				tc.CheckDestroy = func(*terraform.State) error {
 					f.mu.Lock()
@@ -659,7 +659,7 @@ func TestCLIProviderConfiguration(t *testing.T) {
 			}
 
 			f := newServiceFixture(t)
-			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "existing", KeysetIDs: []string{}}}
+			f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "existing", KeysetIDs: []string{}}}
 			var rejectedTransport http.RoundTripper
 			switch test.name {
 			case "control credential":
@@ -822,7 +822,7 @@ func TestCLIClientSeedFormat(t *testing.T) {
 			}
 
 			f := newServiceFixture(t)
-			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+			f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 			tc := cliTestCase(t, f)
 			step := resource.TestStep{Config: fmt.Sprintf(cliSeedClient, fmt.Sprintf("client_key = %q\nclient_key_client_id = %q", input, clientID))}
 			if valid {
@@ -852,7 +852,7 @@ resource "cipherstash_zerokms_client" "app" {
 
 func TestCLIClientKeySeeding(t *testing.T) {
 	f := newServiceFixture(t)
-	f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+	f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
 	tc := cliTestCase(t, f)
 	plain := fmt.Sprintf(cliSeedClient, "")
 	seed := fmt.Sprintf("client_key = %q\nclient_key_client_id = %q", cliSeedKey, clientID)
@@ -917,7 +917,7 @@ func TestCLIClientRetainedKeyIgnoreChanges(t *testing.T) {
 					return nil
 				}
 				if seeded {
-					f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+					f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
 					tc.Steps = []resource.TestStep{
 						{Config: cliProvider},
 						{Config: plain, ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID},
@@ -957,7 +957,7 @@ func TestCLIClientSeedValidation(t *testing.T) {
 	for _, kind := range []string{"missing-uuid", "wrong-uuid", "retained-key-wrong-uuid", "invalid-key", "short-key", "raw32-key", "opaque168-key", "different-key", "unknown-key", "unknown-uuid", "create", "uuid-only-create"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newServiceFixture(t)
-			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+			f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 			tc := cliTestCase(t, f)
 			plain := fmt.Sprintf(cliSeedClient, "")
 			tc.Steps = []resource.TestStep{{Config: cliProvider}, {Config: plain, ResourceName: "cipherstash_zerokms_client.app", ImportState: true, ImportStatePersist: true, ImportStateId: clientID}}
@@ -973,7 +973,7 @@ func TestCLIClientSeedValidation(t *testing.T) {
 				id = fmt.Sprintf("%q", tenantKeysetID)
 				// The declared UUID exists, but is not the imported client. Merely
 				// checking its existence would accept this stale UUID/key pair.
-				f.clients = append(f.clients, control.ZeroKMSClient{ID: tenantKeysetID, Name: "other", Description: "unmanaged", KeysetIDs: []string{keysetID}})
+				f.clients = append(f.clients, manage.ZeroKMSClient{ID: tenantKeysetID, Name: "other", Description: "unmanaged", KeysetIDs: []string{keysetID}})
 				tc.CheckDestroy = func(*terraform.State) error {
 					f.mu.Lock()
 					defer f.mu.Unlock()
@@ -1023,7 +1023,7 @@ func TestCLIClientSeedReplacement(t *testing.T) {
 			for _, keepSeed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/create-first=%t/keep-seed=%t", mode, createFirst, keepSeed), func(t *testing.T) {
 					f := newServiceFixture(t)
-					f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+					f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 					tc := cliTestCase(t, f)
 					lifecycle := fmt.Sprintf("lifecycle { create_before_destroy = %t }", createFirst)
 					plain := fmt.Sprintf(cliSeedClient, lifecycle)
@@ -1100,7 +1100,7 @@ func TestCLIClientSeedSavedPlan(t *testing.T) {
 	for _, readFailure := range []bool{false, true} {
 		t.Run(fmt.Sprintf("read-failure=%t", readFailure), func(t *testing.T) {
 			f := newServiceFixture(t)
-			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
+			f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID}}}
 			tc := cliTestCase(t, f)
 			expected := "The planned client no longer exists"
 			if readFailure {
@@ -1205,7 +1205,7 @@ func testCLIClientTrace(t rapid.TB, f *serviceFixture, reattach *tfexec.Reattach
 		f.clients, f.mutations, f.requests = nil, nil, nil
 		f.secrets = map[string]string{}
 		if imported {
-			f.clients = []control.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
+			f.clients = []manage.ZeroKMSClient{{ID: clientID, Name: "imported", Description: "existing", KeysetIDs: []string{keysetID, tenantKeysetID}}}
 		}
 	})
 	// The model separates operator configuration from persisted identity/secret.

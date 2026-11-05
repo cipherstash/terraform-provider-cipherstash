@@ -16,11 +16,11 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	control "github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
+	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
 )
 
 type clientResource struct {
-	client controlClient
+	client manageClient
 }
 
 var (
@@ -244,7 +244,7 @@ func (r *clientResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	created, err := r.client.CreateZeroKMSClient(ctx, control.CreateZeroKMSClientOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
+	created, err := r.client.CreateZeroKMSClient(ctx, manage.CreateZeroKMSClientOptions{Name: plan.Name.ValueString(), Description: plan.Description.ValueString()})
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot create client", operationError(err))
 		return
@@ -332,7 +332,7 @@ func (r *clientResource) Delete(ctx context.Context, req resource.DeleteRequest,
 		return
 	}
 
-	if err := r.client.DeleteZeroKMSClient(ctx, state.ID.ValueString()); err != nil && !errors.Is(err, control.ErrNotFound) {
+	if err := r.client.DeleteZeroKMSClient(ctx, state.ID.ValueString()); err != nil && !errors.Is(err, manage.ErrNotFound) {
 		resp.Diagnostics.AddError("Cannot delete client", operationError(err))
 	}
 }
@@ -375,8 +375,8 @@ func (r *clientResource) ImportState(ctx context.Context, req resource.ImportSta
 	})...)
 }
 
-func (r *clientResource) findClient(ctx context.Context, id string) (*control.ZeroKMSClient, error) {
-	clients, err := r.client.ListZeroKMSClients(ctx, control.ListZeroKMSClientsOptions{})
+func (r *clientResource) findClient(ctx context.Context, id string) (*manage.ZeroKMSClient, error) {
+	clients, err := r.client.ListZeroKMSClients(ctx, manage.ListZeroKMSClientsOptions{})
 	if err != nil {
 		return nil, err
 	}
