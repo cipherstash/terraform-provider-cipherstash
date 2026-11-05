@@ -112,7 +112,7 @@ Names identify the owning service: `cts` means CipherStash Token Service, which 
 | Resource or data source | What it manages | Change behavior |
 | --- | --- | --- |
 | [`cipherstash_cts_actor`](docs/resources/cts_actor.md) | A machine identity and its access key | Any argument change replaces the actor and creates a new key. |
-| [`cipherstash_zerokms_client`](docs/resources/zerokms_client.md) | A ZeroKMS client and its client key | Name/description changes replace the client; grants are not transferred. UUID-bound key seeding only updates Terraform state. |
+| [`cipherstash_zerokms_client`](docs/resources/zerokms_client.md) | A ZeroKMS client and its client key | Name/description changes replace the client; grants are not transferred. |
 | [`cipherstash_zerokms_keyset`](docs/resources/zerokms_keyset.md) | A keyset's name, description, and enabled status | Updates the existing keyset. Destroy disables it; it does not delete key material. |
 | [`cipherstash_zerokms_keyset_grant`](docs/resources/zerokms_keyset_grant.md) | One client/keyset grant | Changing either ID replaces the grant. Destroy revokes only that pair. |
 | [`cipherstash_zerokms_client` data source](docs/data-sources/zerokms_client.md) | Read-only client metadata | Does not import, change, or delete the client or its grants. |
@@ -124,13 +124,13 @@ Give each managed object one owner. For example, Terraform can manage a shared a
 
 ### Manage client access
 
-Declare an ordinary `cipherstash_zerokms_client` for each application client. Create does not choose a keyset, so CipherStash creates the workspace's default keyset if it does not exist yet, or reuses it, and grants the new client access to it. CipherStash owns that default keyset and those grants: you do not need to import or manage either, and there is no input for the default keyset's name or description. The client resource manages identity, not grants. Its deprecated, computed `keyset_id` records historical creation or import metadata, not current access; you cannot configure that argument. Refresh preserves this value and the client key even if the historical grant disappears or the client has no grants.
+Declare an ordinary `cipherstash_zerokms_client` for each application client. Create does not choose a keyset, so CipherStash creates the workspace's default keyset if it does not exist yet, or reuses it, and grants the new client access to it. CipherStash owns that default keyset and those grants: you do not need to import or manage either, and there is no input for the default keyset's name or description. The client resource manages identity, not grants. Refresh preserves the client key even if the client has no grants.
 
 Use `cipherstash_zerokms_keyset_grant` for access to keysets you manage, such as a shared application keyset; provisioning automation can own tenant keysets and their grants the same way. It manages one `(client_id, keyset_id)` pair, not the client's entire grant list. Import an existing pair rather than creating it again: creation refuses to silently adopt a grant. Grant import checks that the pair exists without changing service state. Importing a client's default-keyset grant still works, but it is not needed. To stop managing such a grant, use a `removed` block that sets `lifecycle { destroy = false }`: destroying it asks CipherStash to revoke the client's creation grant, which it refuses, as the next paragraph describes.
 
 CipherStash refuses to revoke a client's creation grant: the grant to the keyset the client was created with, which is the workspace's default keyset unless another was chosen. The revoke request returns HTTP 400, so destroying a grant resource for that pair fails with "Cannot revoke keyset grant", reports that CipherStash rejected the request as invalid (HTTP 400), and keeps the pair in state. To remove that access, delete the client. Every other grant can be revoked.
 
-Client refresh and import never add, restore or revoke grants, and never enable, rename or disable the default keyset. Deleting a client deletes only the client; the default keyset stays enabled for every other client. Use the existing `cipherstash_zerokms_client` data source's `keyset_ids` to read current grant inventory. Do not use the resource's historical `keyset_id` to determine whether access is currently granted.
+Client refresh and import never add, restore or revoke grants, and never enable, rename or disable the default keyset. Deleting a client deletes only the client; the default keyset stays enabled for every other client. Use the `cipherstash_zerokms_client` data source's `keyset_ids` to read current grant inventory.
 
 Replacing a client creates a different identity. Grants associated with the old client are not transferred to it. Plan credential and grant changes separately; consider `lifecycle { prevent_destroy = true }` for an established client. This provider does not implement an application cutover or prove that deleting a client physically removes every grant record on the service.
 
@@ -232,41 +232,13 @@ Import brings an existing object under Terraform management; it does not recover
 | Resource | Import ID | What import cannot do |
 | --- | --- | --- |
 | Actor | Actor ID, such as `app-JBSWY3DPEHPK3PXP` | Recover `access_key` or `token_expiry`; both are null after import. Setting a token lifetime afterward can require replacement. |
-| Client | Client UUID, with zero, one or many grants; legacy `client UUID/keyset UUID` is also accepted | Recover `client_key` or change grants. UUID-only imports leave `keyset_id` null. Legacy pair imports record the second UUID as historical metadata only, even if that grant no longer exists. |
+| Client | Client UUID, with zero, one or many grants | Recover `client_key` or change grants. |
 | Keyset | Keyset UUID | Delete key material or select the workspace default. Import refuses the workspace default keyset, which CipherStash owns. Import includes disabled keysets; set `enabled = false` to keep one disabled. |
 | Grant | `client UUID/keyset UUID` | Create the pair or change other grants. |
 
 The example IDs are placeholders. To keep an imported actor or client, use its previously saved credential from your secret store. To obtain a new credential, replace the resource and plan the change for its consumers.
 
-The client ID, client key and computed string `keyset_id` retain their attribute representations; the resource type rename is a separate breaking change as described above. Within the current resource type, refresh preserves historical `keyset_id` values, while new UUID-only imports do not select a grant. A legacy pair import validates both UUIDs and the client's existence, but does not validate the keyset or grant. Import the pair separately as a `cipherstash_zerokms_keyset_grant` if Terraform should own that permission.
-
-### Record an existing client key after import
-
-Import first without seed arguments. To record a key you already hold, subsequently configure both `client_key` and `client_key_client_id`, then review and apply the state-only update:
-
-```hcl
-variable "existing_client_key" {
-  type      = string
-  sensitive = true
-}
-
-resource "cipherstash_zerokms_client" "api" {
-  name                 = "existing-name"
-  description          = "existing-description"
-  client_key_client_id = "11111111-1111-4111-8111-111111111111" # The UUID you imported.
-  client_key           = var.existing_client_key
-}
-```
-
-Supply the secret through your protected variable mechanism, not an import ID or committed file. The key must be a generated v1 CBOR permutation keyset encoded as standard base64 or mixed-case hex, without whitespace. The supplied string is preserved exactly, not normalized. This is not a raw 32-byte key: [recipher 0.3.1](https://docs.rs/crate/recipher/0.3.1/source/src/keyset/proxy_keyset.rs) serializes four named fields (`p1`, `p2_from`, `p2_to`, `p3`), each containing a `permutation` integer array. Validation requires permutations of 0–15 for the first three and 0–32 for the last, and rejects duplicate fields and trailing data. Field order and total encoded length are not fixed; unknown fields are ignored. This supports the generated named-map format, not every alternate representation accepted by Rust's permissive deserializer.
-
-Both inputs must be known during planning, and the explicit UUID must match the managed client. Do not derive the expected UUID from this resource's own `id`: that would defeat the protection against reusing configuration for another import. This check verifies the operator's declared pairing, not cryptographic ownership. Verify key/client correspondence separately with your application; refresh performs no encryption or decryption.
-
-Seeding does not write to CipherStash, rotate a credential, change metadata or manage grants. An already-persisted key can only be retained, not replaced by another supplied value. Refresh, removing the seed arguments and setting them to null retain the stored key. Removing `client_key_client_id` may itself produce a state-only update. A missing remote client or failed inventory read prevents adoption, including when applying a previously saved adoption plan. A null key is not proof of import provenance: failed creation-secret export can also leave one.
-
-Creation and replacement are rejected during planning while either seed argument is configured, including taint and `-replace` with either replacement order. For intentional replacement, remove both seed arguments and review the resulting credential/grant changes. The new client receives its own new key, never the seed. These checks do not prevent intentional destroy; use `prevent_destroy` when appropriate.
-
-Terraform's `ignore_changes` has its normal semantics. An ignored key change retains the stored value instead of adopting or rejecting the ignored input. Ignoring a null imported key will not seed it. UUID assertions are checked against Terraform's effective configuration too; do not ignore a UUID change if you intend the provider to evaluate it. Keys remain in state and saved plans despite sensitive marking.
+To have Terraform own one of a client's grants, import that pair separately as a `cipherstash_zerokms_keyset_grant`.
 
 ### Disable or stop managing a keyset
 
@@ -278,7 +250,7 @@ Destroy disables the keyset, confirms that it is disabled or absent, and removes
 
 Import does not enable a disabled keyset, but configuration defaults `enabled` to `true`. Set `enabled = false` to keep it disabled. A new keyset is always created enabled; `enabled = false` is applied afterward, with the returned ID saved first. If that request fails, inspect state and the next plan before retrying. To manage a keyset again after destroy, import its retained ID. The provider does not automatically adopt an existing keyset by name.
 
-The workspace default keyset is not a keyset this resource manages. Import refuses it, and if state already holds it, for example from an earlier import, any plan that would rename, re-describe, enable, disable or destroy it fails. Remove it from management with a `removed` block that sets `lifecycle { destroy = false }`; deleting the resource block alone plans a destroy, which fails.
+The workspace default keyset is not a keyset this resource manages. Import refuses it. If state already holds it, for example from an earlier import, refresh fails with "Cannot manage the workspace default keyset", so a refreshed plan cannot rename, re-describe, enable, disable or destroy it. Update and destroy also check live inventory before writing and refuse the default, so `terraform apply -refresh=false` cannot change it either. Remove it from management with a `removed` block that sets `lifecycle { destroy = false }`; that works even though refresh fails.
 
 Use `lifecycle { prevent_destroy = true }` to reject a destroy plan while the resource block remains configured. It does not prevent an in-place `enabled = false` update, and it stops protecting the resource if you remove the entire block. To stop managing a keyset without disabling it, use Terraform's `removed` block with `lifecycle { destroy = false }` rather than a normal destroy.
 
@@ -311,7 +283,18 @@ Before the BNDRY migration, on 2026-10-30, the native-backed actor/client accept
 
 The BNDRY-backed provider repeated the actor/client Terraform acceptance test on 2026-10-30 in Development workspace `2JTSJCX24VP2WCBC`, using a temporary module replacement for the local inventory-hardening fix. Creation, refresh, UUID and legacy-pair imports, replacement and deletion passed; actor, access-key and client IDs matched the baseline afterward. This run did not repeat the keyset/grant lifecycle or validate a published dependency containing that fix.
 
-Live zero-grant inventory representation remains unverified, and revocation cannot produce a zero-grant client because the creation grant cannot be revoked. Offline Terraform CLI tests cover zero-grant import and refresh; accepting an empty array in a fixture is not live evidence. None of these checks establishes immediate credential invalidation after deletion; see the actor-key observation above. Client-key seeding checks format and the asserted UUID, not cryptographic key/client correspondence.
+Live zero-grant inventory representation remains unverified, and revocation cannot produce a zero-grant client because the creation grant cannot be revoked. Offline Terraform CLI tests cover zero-grant import and refresh; accepting an empty array in a fixture is not live evidence. None of these checks establishes immediate credential invalidation after deletion; see the actor-key observation above.
+
+### Migrate from earlier client and keyset attributes
+
+These are breaking changes with no compatibility aliases. Existing state needs no manual edit unless it holds the workspace default keyset.
+
+| Removed | What to do |
+| --- | --- |
+| The client's computed `keyset_id` | Read current grants from the `cipherstash_zerokms_client` data source's `keyset_ids`. References to `cipherstash_zerokms_client.<name>.keyset_id` fail with "Unsupported attribute". Existing state loads without error, and Terraform drops the stored value the next time it writes state. |
+| Client import IDs of the form `client UUID/keyset UUID` | Import the client by its UUID. Import the pair as a `cipherstash_zerokms_keyset_grant` if Terraform should own that grant. |
+| `client_key_client_id`, and setting `client_key` in configuration | Remove both arguments; `client_key` is now read-only. A key already in state, including one recorded this way, stays there. Keep keys for imported clients in your secret store. |
+| The keyset's computed `is_default` | None. If a `cipherstash_zerokms_keyset` resource holds the workspace default keyset, refresh now fails; replace its resource block with a `removed` block that sets `lifecycle { destroy = false }`. |
 
 ### Preserve existing configuration
 

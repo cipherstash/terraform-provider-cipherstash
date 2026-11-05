@@ -111,7 +111,7 @@ func savedActor() actorModel {
 func savedClient() clientModel {
 	return clientModel{
 		ID: types.StringValue(clientID), Name: types.StringValue("before"), Description: types.StringValue("old description"),
-		KeysetID: types.StringValue(keysetID), ClientKey: types.StringValue("test-secret-not-a-credential"),
+		ClientKey: types.StringValue("test-secret-not-a-credential"),
 	}
 }
 
@@ -209,7 +209,7 @@ func TestActorImportDoesNotInventSecret(t *testing.T) {
 }
 
 func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
-	for _, scenario := range []string{"external grants", "missing tracked grant", "absent", "failed list"} {
+	for _, scenario := range []string{"external grants", "default grant gone", "absent", "failed list"} {
 		t.Run(scenario, func(t *testing.T) {
 			r := &clientResource{client: testManage{clients: func() ([]manage.ZeroKMSClient, error) {
 				switch scenario {
@@ -217,7 +217,7 @@ func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
 					return nil, nil
 				case "failed list":
 					return nil, manage.ErrAuthentication
-				case "missing tracked grant":
+				case "default grant gone":
 					return []manage.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID}}}, nil
 				default:
 					return []manage.ZeroKMSClient{{ID: clientID, Name: "renamed", Description: "new description", KeysetIDs: []string{tenantKeysetID, keysetID}}}, nil
@@ -241,27 +241,23 @@ func TestClientRefreshPreservesSecretAndExternalGrants(t *testing.T) {
 				require.Equal(t, "renamed", after.Name.ValueString())
 				require.Equal(t, "new description", after.Description.ValueString())
 				require.True(t, after.ClientKey.Equal(before.ClientKey), "refresh lost secret")
-				require.True(t, after.KeysetID.Equal(before.KeysetID), "refresh lost tracked grant")
 			}
 		})
 	}
 }
 
-func TestClientImportPreservesHistoricalMetadata(t *testing.T) {
+func TestClientImportByUUID(t *testing.T) {
 	for _, tc := range []struct {
 		name, id string
 		grants   []string
-		want     string
 		fail     bool
 	}{
-		{"single", clientID, []string{keysetID}, "", false},
-		{"multiple", clientID, []string{tenantKeysetID, keysetID}, "", false},
-		{"explicit second", clientID + "/" + keysetID, []string{tenantKeysetID, keysetID}, keysetID, false},
-		{"missing selected", clientID + "/" + keysetID, []string{tenantKeysetID}, keysetID, false},
-		{"no grants", clientID, nil, "", false},
-		{"invalid uuid", "not-a-uuid", nil, "", true},
-		{"too many segments", clientID + "/" + keysetID + "/extra", nil, "", true},
-		{"missing object", clientID, nil, "", true},
+		{"single", clientID, []string{keysetID}, false},
+		{"multiple", clientID, []string{tenantKeysetID, keysetID}, false},
+		{"no grants", clientID, nil, false},
+		{"invalid uuid", "not-a-uuid", nil, true},
+		{"client/keyset pair", clientID + "/" + keysetID, []string{keysetID}, true},
+		{"missing object", clientID, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &clientResource{client: testManage{clients: func() ([]manage.ZeroKMSClient, error) {
@@ -281,8 +277,6 @@ func TestClientImportPreservesHistoricalMetadata(t *testing.T) {
 			var state clientModel
 			noErrors(t, resp.State.Get(context.Background(), &state))
 			require.Equal(t, clientID, state.ID.ValueString())
-			require.Equal(t, tc.want, state.KeysetID.ValueString())
-			require.Equal(t, tc.want == "", state.KeysetID.IsNull())
 			require.True(t, state.ClientKey.IsNull(), "import invented secret")
 		})
 	}
@@ -568,7 +562,7 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 					return []manage.ZeroKMSKeyset{remote}, nil
 				},
 			}}
-			plan := resourceState(t, r, keysetModel{ID: types.StringUnknown(), Name: types.StringValue("created"), Description: types.StringValue("creation description"), Enabled: types.BoolValue(scenario == "enabled"), IsDefault: types.BoolUnknown()})
+			plan := resourceState(t, r, keysetModel{ID: types.StringUnknown(), Name: types.StringValue("created"), Description: types.StringValue("creation description"), Enabled: types.BoolValue(scenario == "enabled")})
 			result = resource.CreateResponse{State: tfsdk.State{Schema: plan.Schema}}
 			r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(plan)}, &result)
 			require.Equal(t, scenario != "enabled" && scenario != "disabled", result.Diagnostics.HasError(), "%v", result.Diagnostics)
@@ -582,7 +576,6 @@ func TestKeysetCreateRetainsIdentityOnSupplementalFailure(t *testing.T) {
 			require.Equal(t, keysetID, saved.ID.ValueString())
 			require.Equal(t, "created", saved.Name.ValueString())
 			require.Equal(t, scenario == "enabled" || scenario == "disable failed", saved.Enabled.ValueBool())
-			require.False(t, saved.IsDefault.ValueBool())
 		})
 	}
 }
@@ -602,7 +595,7 @@ func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 
 				return keysets, nil
 			}}}
-			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("before"), Description: types.StringValue("before"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)})
+			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("before"), Description: types.StringValue("before"), Enabled: types.BoolValue(true)})
 			read := resource.ReadResponse{State: before}
 			r.Read(context.Background(), resource.ReadRequest{State: before}, &read)
 			require.Equal(t, scenario == "failed list", read.Diagnostics.HasError(), "%v", read.Diagnostics)
@@ -626,7 +619,6 @@ func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 					require.Equal(t, "renamed", saved.Name.ValueString())
 					require.Equal(t, "new description", saved.Description.ValueString())
 					require.False(t, saved.Enabled.ValueBool())
-					require.False(t, saved.IsDefault.ValueBool())
 					require.True(t, read.State.Raw.Equal(imported.State.Raw), "refresh/import disagree")
 				}
 			}
@@ -635,11 +627,13 @@ func TestKeysetReadAndImportIncludeDisabled(t *testing.T) {
 }
 
 func TestKeysetUpdatePreservesPartialSuccess(t *testing.T) {
-	for _, scenario := range []string{"success", "modify failed", "disable failed", "read failed", "write not visible"} {
+	for _, scenario := range []string{"success", "modify failed", "disable failed", "read failed", "write not visible", "default", "preflight failed"} {
 		t.Run(scenario, func(t *testing.T) {
-			remote := manage.ZeroKMSKeyset{ID: keysetID, Name: "unchanged", Description: "old description"}
+			remote := manage.ZeroKMSKeyset{ID: keysetID, Name: "unchanged", Description: "old description", IsDefault: scenario == "default"}
+			listed := 0
 			r := &keysetResource{client: testManage{
 				modifyKeyset: func(id string, opts manage.ModifyZeroKMSKeysetOptions) error {
+					require.NotContains(t, []string{"default", "preflight failed"}, scenario, "update wrote before its live check passed")
 					require.Equal(t, keysetID, id)
 					require.Nil(t, opts.Name, "metadata update must only send the changed description")
 					require.NotNil(t, opts.Description)
@@ -666,29 +660,31 @@ func TestKeysetUpdatePreservesPartialSuccess(t *testing.T) {
 					return nil
 				},
 				keysets: func(manage.ListZeroKMSKeysetsOptions) ([]manage.ZeroKMSKeyset, error) {
-					if scenario == "read failed" {
+					listed++
+					if (scenario == "preflight failed" && listed == 1) || (scenario == "read failed" && listed > 1) {
 						return nil, manage.ErrAuthentication
 					}
 
 					return []manage.ZeroKMSKeyset{remote}, nil
 				},
 			}}
-			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("unchanged"), Description: types.StringValue("old description"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)})
-			plan := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("unchanged"), Description: types.StringValue("new description"), Enabled: types.BoolValue(false), IsDefault: types.BoolUnknown()})
+			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("unchanged"), Description: types.StringValue("old description"), Enabled: types.BoolValue(true)})
+			plan := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("unchanged"), Description: types.StringValue("new description"), Enabled: types.BoolValue(false)})
 			updated := resource.UpdateResponse{State: before}
 			r.Update(context.Background(), resource.UpdateRequest{State: before, Plan: tfsdk.Plan(plan)}, &updated)
 			require.Equal(t, scenario != "success", updated.Diagnostics.HasError(), "%v", updated.Diagnostics)
 			require.NotContains(t, fmt.Sprint(updated.Diagnostics), "test-secret-not-a-credential")
 			var saved keysetModel
 			noErrors(t, updated.State.Get(context.Background(), &saved))
+			unchanged := scenario == "modify failed" || scenario == "default" || scenario == "preflight failed"
 			wantDescription := "new description"
-			if scenario == "modify failed" {
+			if unchanged {
 				wantDescription = "old description"
 			}
 
 			require.Equal(t, keysetID, saved.ID.ValueString())
 			require.Equal(t, wantDescription, saved.Description.ValueString())
-			require.Equal(t, scenario == "modify failed" || scenario == "disable failed" || scenario == "write not visible", saved.Enabled.ValueBool())
+			require.Equal(t, unchanged || scenario == "disable failed" || scenario == "write not visible", saved.Enabled.ValueBool())
 		})
 	}
 }
@@ -724,7 +720,7 @@ func TestKeysetDestroyRequiresConfirmedDisablement(t *testing.T) {
 			}}
 			// Prior state says disabled; live inventory, not this stale value,
 			// must decide whether destroy needs to disable the keyset.
-			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("retained"), Description: types.StringValue("retained description"), Enabled: types.BoolValue(false), IsDefault: types.BoolValue(false)})
+			before := resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("retained"), Description: types.StringValue("retained description"), Enabled: types.BoolValue(false)})
 			deleted := resource.DeleteResponse{State: before}
 			r.Delete(context.Background(), resource.DeleteRequest{State: before}, &deleted)
 			wantError := scenario != "enabled" && scenario != "disabled" && scenario != "missing"

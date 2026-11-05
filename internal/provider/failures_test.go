@@ -32,7 +32,7 @@ func TestSDKReadFailureIsNotAbsence(t *testing.T) {
 				case "client":
 					r, model, endpoint = &clientResource{client: client}, savedClient(), "/list-clients"
 				case "keyset":
-					r, model, endpoint = &keysetResource{client: client}, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("application"), Description: types.StringValue("owned"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)}, "/list-keysets"
+					r, model, endpoint = &keysetResource{client: client}, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("application"), Description: types.StringValue("owned"), Enabled: types.BoolValue(true)}, "/list-keysets"
 				case "grant":
 					r, model, endpoint = &keysetGrantResource{client: client}, keysetGrantModel{ID: types.StringValue(clientID + "/" + keysetID), ClientID: types.StringValue(clientID), KeysetID: types.StringValue(keysetID)}, "/list-clients"
 				}
@@ -109,7 +109,7 @@ func TestMalformedInventoryPreservesState(t *testing.T) {
 				case "client":
 					r, model = &clientResource{client: client}, savedClient()
 				case "keyset":
-					r, model = &keysetResource{client: client}, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("application"), Description: types.StringValue("owned"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)}
+					r, model = &keysetResource{client: client}, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("application"), Description: types.StringValue("owned"), Enabled: types.BoolValue(true)}
 				case "grant":
 					r, model = &keysetGrantResource{client: client}, keysetGrantModel{ID: types.StringValue(clientID + "/" + keysetID), ClientID: types.StringValue(clientID), KeysetID: types.StringValue(keysetID)}
 				}
@@ -184,13 +184,20 @@ func TestSDKKeysetPartialWrites(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := newServiceFixture(t)
 			f.keysets[1].IsDisabled = !test.initiallyEnabled
+			// Update reads inventory once before writing, so a confirmation
+			// fault skips that preflight read.
+			attemptsWanted := 1
 			f.faults = []serviceFault{{path: test.endpoint, afterWrite: test.afterWrite, status: 500}}
+			if test.endpoint == "/list-keysets" {
+				f.faults[0].skip, attemptsWanted = 1, 2
+			}
+
 			if test.name == "metadata and confirmation rejected after enable" {
-				f.faults = append(f.faults, serviceFault{path: "/list-keysets", status: 500})
+				f.faults = append(f.faults, serviceFault{path: "/list-keysets", skip: 1, status: 500})
 			}
 
 			r := &keysetResource{client: fixtureClient(t, fixtureTransport(t, "admin", f.ServeHTTP))}
-			model := keysetModel{ID: types.StringValue(tenantKeysetID), Name: types.StringValue("external"), Description: types.StringValue("Worker owned"), Enabled: types.BoolValue(test.initiallyEnabled), IsDefault: types.BoolValue(false)}
+			model := keysetModel{ID: types.StringValue(tenantKeysetID), Name: types.StringValue("external"), Description: types.StringValue("Worker owned"), Enabled: types.BoolValue(test.initiallyEnabled)}
 			before := resourceState(t, r, model)
 			model.Description, model.Enabled = types.StringValue("updated"), types.BoolValue(!test.initiallyEnabled)
 			plan := resourceState(t, r, model)
@@ -213,7 +220,7 @@ func TestSDKKeysetPartialWrites(t *testing.T) {
 					}
 				}
 
-				assert.Equal(t, 1, attempts, "failed operation was retried")
+				assert.Equal(t, attemptsWanted, attempts, "failed operation was retried")
 			})
 		})
 	}
@@ -300,7 +307,7 @@ func TestSDKKeysetDestroyConfirmation(t *testing.T) {
 	f := newServiceFixture(t)
 	f.faults = []serviceFault{{path: "/list-keysets", skip: 1, status: 500}}
 	r := &keysetResource{client: fixtureClient(t, fixtureTransport(t, "admin", f.ServeHTTP))}
-	before := resourceState(t, r, keysetModel{ID: types.StringValue(tenantKeysetID), Name: types.StringValue("external"), Description: types.StringValue("Worker owned"), Enabled: types.BoolValue(true), IsDefault: types.BoolValue(false)})
+	before := resourceState(t, r, keysetModel{ID: types.StringValue(tenantKeysetID), Name: types.StringValue("external"), Description: types.StringValue("Worker owned"), Enabled: types.BoolValue(true)})
 	resp := resource.DeleteResponse{State: before}
 	r.Delete(context.Background(), resource.DeleteRequest{State: before}, &resp)
 	require.True(t, resp.Diagnostics.HasError(), "%v", resp.Diagnostics)

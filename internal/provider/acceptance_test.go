@@ -119,11 +119,7 @@ data "cipherstash_zerokms_client" "test" {
 				return fmt.Errorf("data source did not read the created client's metadata and grant")
 			}
 
-			if err := resource.TestCheckTypeSetElemAttrPair("data.cipherstash_zerokms_client.test", "keyset_ids.*", "cipherstash_zerokms_client.test", "keyset_id")(state); err != nil {
-				return err
-			}
-
-			if actor.ID == "" || client.ID == "" || actor.Attributes["key_id"] == "" || client.Attributes["keyset_id"] == "" {
+			if actor.ID == "" || client.ID == "" || actor.Attributes["key_id"] == "" {
 				return fmt.Errorf("created resource metadata is incomplete")
 			}
 
@@ -173,14 +169,7 @@ data "cipherstash_zerokms_client" "test" {
 			{Config: configuration("", "app", "member"), Check: check(false)},
 			{Config: configuration("", "app", "member"), Check: check(false)},
 			{ResourceName: "cipherstash_cts_actor.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"access_key", "token_expiry"}},
-			{ResourceName: "cipherstash_zerokms_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key", "keyset_id"}},
-			{
-				ResourceName: "cipherstash_zerokms_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key"},
-				ImportStateIdFunc: func(s *terraform.State) (string, error) {
-					client := s.RootModule().Resources["cipherstash_zerokms_client.test"].Primary
-					return client.ID + "/" + client.Attributes["keyset_id"], nil
-				},
-			},
+			{ResourceName: "cipherstash_zerokms_client.test", ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"client_key"}},
 			{Config: configuration("-v2", "agent", "control"), Check: check(true)},
 		},
 	})

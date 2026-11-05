@@ -229,7 +229,7 @@ func TestClientCreatePreservesEncodedSecret(t *testing.T) {
 		assert.NoError(t, err)
 	})
 	r := &clientResource{client: fixtureClient(t, rt)}
-	plan := resourceState(t, r, clientModel{Name: types.StringValue("test-client"), Description: types.StringValue("create test"), ID: types.StringUnknown(), KeysetID: types.StringUnknown(), ClientKey: types.StringUnknown()})
+	plan := resourceState(t, r, clientModel{Name: types.StringValue("test-client"), Description: types.StringValue("create test"), ID: types.StringUnknown(), ClientKey: types.StringUnknown()})
 	config := resourceState(t, r, clientModel{Name: types.StringValue("test-client"), Description: types.StringValue("create test")})
 	resp := resource.CreateResponse{State: resourceState(t, r, clientModel{})}
 	r.Create(context.Background(), resource.CreateRequest{Config: tfsdk.Config(config), Plan: tfsdk.Plan(plan)}, &resp)
@@ -237,7 +237,6 @@ func TestClientCreatePreservesEncodedSecret(t *testing.T) {
 	var state clientModel
 	noErrors(t, resp.State.Get(context.Background(), &state))
 	require.Equal(t, clientID, state.ID.ValueString())
-	require.Equal(t, keysetID, state.KeysetID.ValueString())
 	require.Equal(t, "AQIDBA==", state.ClientKey.ValueString())
 }
 
@@ -447,7 +446,7 @@ func TestKeysetSDKCRUDDisablesAndRetains(t *testing.T) {
 		}
 	})
 	r := &keysetResource{client: fixtureClient(t, rt)}
-	plan := resourceState(t, r, keysetModel{ID: types.StringUnknown(), Name: types.StringValue("created"), Description: types.StringValue("original description"), Enabled: types.BoolValue(false), IsDefault: types.BoolUnknown()})
+	plan := resourceState(t, r, keysetModel{ID: types.StringUnknown(), Name: types.StringValue("created"), Description: types.StringValue("original description"), Enabled: types.BoolValue(false)})
 	created := resource.CreateResponse{State: tfsdk.State{Schema: plan.Schema}}
 	r.Create(context.Background(), resource.CreateRequest{Plan: tfsdk.Plan(plan)}, &created)
 	noErrors(t, created.Diagnostics)
@@ -455,8 +454,7 @@ func TestKeysetSDKCRUDDisablesAndRetains(t *testing.T) {
 	noErrors(t, created.State.Get(context.Background(), &saved))
 	require.Equal(t, keysetID, saved.ID.ValueString())
 	require.False(t, saved.Enabled.ValueBool())
-	require.False(t, saved.IsDefault.ValueBool())
-	plan = resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("renamed"), Description: types.StringValue("original description"), Enabled: types.BoolValue(true), IsDefault: types.BoolUnknown()})
+	plan = resourceState(t, r, keysetModel{ID: types.StringValue(keysetID), Name: types.StringValue("renamed"), Description: types.StringValue("original description"), Enabled: types.BoolValue(true)})
 	updated := resource.UpdateResponse{State: created.State}
 	r.Update(context.Background(), resource.UpdateRequest{State: created.State, Plan: tfsdk.Plan(plan)}, &updated)
 	noErrors(t, updated.Diagnostics)

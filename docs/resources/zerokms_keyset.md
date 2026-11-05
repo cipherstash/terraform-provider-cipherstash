@@ -4,7 +4,7 @@ page_title: "cipherstash_zerokms_keyset Resource - cipherstash"
 subcategory: ""
 description: |-
   Create and manage a keyset in ZeroKMS. A keyset is an independent authority-key scope: clients must be granted access to use it. This resource manages the keyset's name, description, and enabled status without creating a client or grant. Use cipherstash_zerokms_keyset_grant to grant access separately.
-  CipherStash owns the workspace default keyset, which it creates when needed and grants to every new cipherstash_zerokms_client. Do not manage it with this resource: import refuses it, and a plan that would change or destroy one already in state fails. To stop managing it without changing it, use a removed block with lifecycle { destroy = false }.
+  CipherStash owns the workspace default keyset, which it creates when needed and grants to every new cipherstash_zerokms_client. Do not manage it with this resource: import refuses it, refresh fails while it is in state, and update and destroy check live inventory and refuse to change or disable it. To stop managing it without changing it, use a removed block with lifecycle { destroy = false }.
   Changes update the existing keyset without rotating its key material. Destroy disables the keyset and removes it from Terraform state; it does not delete the keyset or its key material. Disabling can interrupt every client using the keyset, but leaves grants in place. Import the retained keyset ID to manage it again.
   Give each keyset one owner: Terraform or your provisioning automation, not both. Live Development API probes created, enabled and disabled an isolated test keyset. These probes do not establish the full Terraform lifecycle, including metadata updates; verify that lifecycle before production use. A live test keyset is a lasting resource: this provider can disable it but cannot delete it. See the README's live verification limits.
 ---
@@ -13,7 +13,7 @@ description: |-
 
 Create and manage a keyset in ZeroKMS. A keyset is an independent authority-key scope: clients must be granted access to use it. This resource manages the keyset's name, description, and enabled status without creating a client or grant. Use `cipherstash_zerokms_keyset_grant` to grant access separately.
 
-CipherStash owns the workspace default keyset, which it creates when needed and grants to every new `cipherstash_zerokms_client`. Do not manage it with this resource: import refuses it, and a plan that would change or destroy one already in state fails. To stop managing it without changing it, use a `removed` block with `lifecycle { destroy = false }`.
+CipherStash owns the workspace default keyset, which it creates when needed and grants to every new `cipherstash_zerokms_client`. Do not manage it with this resource: import refuses it, refresh fails while it is in state, and update and destroy check live inventory and refuse to change or disable it. To stop managing it without changing it, use a `removed` block with `lifecycle { destroy = false }`.
 
 Changes update the existing keyset without rotating its key material. Destroy disables the keyset and removes it from Terraform state; it does not delete the keyset or its key material. Disabling can interrupt every client using the keyset, but leaves grants in place. Import the retained keyset ID to manage it again.
 
@@ -36,4 +36,3 @@ Give each keyset one owner: Terraform or your provisioning automation, not both.
 ### Read-Only
 
 - `id` (String) Keyset ID as a UUID. Use this ID to import an existing keyset, including one retained after destroy.
-- `is_default` (Boolean) Whether CipherStash identifies this as the workspace's default keyset. This value is computed. This resource cannot select, change or disable the default keyset.

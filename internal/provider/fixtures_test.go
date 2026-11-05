@@ -1,12 +1,8 @@
 package provider
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"slices"
 	"strconv"
@@ -15,39 +11,10 @@ import (
 	"testing"
 
 	"github.com/cipherstash/terraform-provider-cipherstash/pkg/stack/manage"
-	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 )
 
 const fixtureTimestamp = "2026-10-26T00:00:00Z"
-
-// Public deterministic permutations in recipher 0.3.1's generated v1 format.
-// These are structural test values, not registered CipherStash credentials.
-func fixtureClientKey(seed string) string {
-	hash := sha256.Sum256([]byte(seed))
-	rng := rand.New(rand.NewPCG(binary.LittleEndian.Uint64(hash[:8]), binary.LittleEndian.Uint64(hash[8:16])))
-	key := map[string]map[string][]int{}
-	for _, name := range []string{"p1", "p2_from", "p2_to", "p3"} {
-		size := 16
-		if name == "p3" {
-			size = 33
-		}
-
-		key[name] = map[string][]int{"permutation": rng.Perm(size)}
-	}
-
-	mode, err := cbor.CanonicalEncOptions().EncMode()
-	if err != nil {
-		panic(err)
-	}
-
-	encoded, err := mode.Marshal(key)
-	if err != nil {
-		panic(err)
-	}
-
-	return base64.StdEncoding.EncodeToString(encoded)
-}
 
 // Management models are not wire types; use the service's snake_case fields.
 func keysetJSON(k manage.ZeroKMSKeyset) map[string]any {
@@ -234,7 +201,7 @@ func (f *serviceFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		id := f.newID()
 		f.clients = append(f.clients, manage.ZeroKMSClient{ID: id, Name: *input.Name, Description: *input.Description, KeysetIDs: []string{keysetID}})
-		f.secrets[id] = fixtureClientKey(id)
+		f.secrets[id] = "fixture-client-key-" + id
 		body = map[string]any{"id": id, "name": *input.Name, "description": *input.Description, "dataset_id": keysetID, "client_key": f.secrets[id]}
 		mutation = true
 	case r.Method == http.MethodPost && r.URL.Path == "/list-clients":

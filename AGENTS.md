@@ -45,7 +45,7 @@ Lint is stricter than `check`: it formats with gofumpt rather than gofmt, requir
 - State rules:
   - Save the new identity and any secret with `resp.State.Set` right after the create call, before any follow-up read, so a failed readback cannot orphan the object.
   - Call `RemoveResource` only after a successful List shows the object absent; a failed read keeps state.
-  - Refresh and import only read. Refresh keeps values the API cannot return (`access_key`, `token_expiry`, `client_key`, `keyset_id`).
+  - Refresh and import only read. Refresh keeps values the API cannot return (`access_key`, `token_expiry`, `client_key`).
   - Deleting an object that is already gone succeeds. Writes are never retried.
   - Create never adopts an existing object; the user imports it instead.
 - Breaking changes (Terraform arguments, type names or exported Go identifiers) ship without compatibility aliases or state migration and are documented in the README.

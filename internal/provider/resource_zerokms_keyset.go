@@ -37,7 +37,6 @@ type keysetModel struct {
 	Name        types.String `tfsdk:"name"`
 	Description types.String `tfsdk:"description"`
 	Enabled     types.Bool   `tfsdk:"enabled"`
-	IsDefault   types.Bool   `tfsdk:"is_default"`
 }
 
 func (r *keysetResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -46,7 +45,7 @@ func (r *keysetResource) Metadata(_ context.Context, req resource.MetadataReques
 
 func (r *keysetResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Create and manage a keyset in ZeroKMS. A keyset is an independent authority-key scope: clients must be granted access to use it. This resource manages the keyset's name, description, and enabled status without creating a client or grant. Use `cipherstash_zerokms_keyset_grant` to grant access separately.\n\nCipherStash owns the workspace default keyset, which it creates when needed and grants to every new `cipherstash_zerokms_client`. Do not manage it with this resource: import refuses it, and a plan that would change or destroy one already in state fails. To stop managing it without changing it, use a `removed` block with `lifecycle { destroy = false }`.\n\nChanges update the existing keyset without rotating its key material. Destroy disables the keyset and removes it from Terraform state; it does not delete the keyset or its key material. Disabling can interrupt every client using the keyset, but leaves grants in place. Import the retained keyset ID to manage it again.\n\nGive each keyset one owner: Terraform or your provisioning automation, not both. Live Development API probes created, enabled and disabled an isolated test keyset. These probes do not establish the full Terraform lifecycle, including metadata updates; verify that lifecycle before production use. A live test keyset is a lasting resource: this provider can disable it but cannot delete it. See the README's live verification limits.",
+		Description: "Create and manage a keyset in ZeroKMS. A keyset is an independent authority-key scope: clients must be granted access to use it. This resource manages the keyset's name, description, and enabled status without creating a client or grant. Use `cipherstash_zerokms_keyset_grant` to grant access separately.\n\nCipherStash owns the workspace default keyset, which it creates when needed and grants to every new `cipherstash_zerokms_client`. Do not manage it with this resource: import refuses it, refresh fails while it is in state, and update and destroy check live inventory and refuse to change or disable it. To stop managing it without changing it, use a `removed` block with `lifecycle { destroy = false }`.\n\nChanges update the existing keyset without rotating its key material. Destroy disables the keyset and removes it from Terraform state; it does not delete the keyset or its key material. Disabling can interrupt every client using the keyset, but leaves grants in place. Import the retained keyset ID to manage it again.\n\nGive each keyset one owner: Terraform or your provisioning automation, not both. Live Development API probes created, enabled and disabled an isolated test keyset. These probes do not establish the full Terraform lifecycle, including metadata updates; verify that lifecycle before production use. A live test keyset is a lasting resource: this provider can disable it but cannot delete it. See the README's live verification limits.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Computed: true, Description: "Keyset ID as a UUID. Use this ID to import an existing keyset, including one retained after destroy.",
@@ -63,9 +62,6 @@ func (r *keysetResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 			"enabled": schema.BoolAttribute{
 				Optional: true, Computed: true, Default: booldefault.StaticBool(true),
 				Description: "Whether the keyset is enabled. Defaults to `true`. Set to `false` to disable access without deleting key material or grants. To keep an imported keyset disabled, set this to `false` in your configuration. A new keyset is created enabled, then disabled in a separate request if this is `false`. Metadata changes require an enabled keyset: a planned enable happens before metadata updates, and a planned disable happens afterward. Metadata changes to an already-disabled keyset require `enabled = true`; the provider never temporarily enables a keyset configured to remain disabled.",
-			},
-			"is_default": schema.BoolAttribute{
-				Computed: true, Description: "Whether CipherStash identifies this as the workspace's default keyset. This value is computed. This resource cannot select, change or disable the default keyset.",
 			},
 		},
 	}
@@ -88,35 +84,19 @@ const defaultKeysetOwnership = "CipherStash owns the workspace default keyset: i
 const defaultKeysetRemoval = " To stop managing it without changing it, replace the resource block with a removed block that sets lifecycle { destroy = false }."
 
 func (r *keysetResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() {
+		resp.Diagnostics.AddWarning("Destroy disables the keyset", "Applying this destroy will disable the keyset, interrupting clients that use it, then remove it from Terraform state. The keyset and key material remain remotely. Import its UUID to manage it again.")
+		return
+	}
+
 	if req.State.Raw.IsNull() {
 		return
 	}
 
-	var current keysetModel
+	var plan, current keysetModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &current)...)
 	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	if req.Plan.Raw.IsNull() {
-		if current.IsDefault.ValueBool() {
-			resp.Diagnostics.AddError("Cannot destroy the workspace default keyset", "Destroying this resource would disable the keyset every default client uses. "+defaultKeysetOwnership+defaultKeysetRemoval)
-			return
-		}
-
-		resp.Diagnostics.AddWarning("Destroy disables the keyset", "Applying this destroy will disable the keyset, interrupting clients that use it, then remove it from Terraform state. The keyset and key material remain remotely. Import its UUID to manage it again.")
-
-		return
-	}
-
-	var plan keysetModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	if current.IsDefault.ValueBool() && (!plan.Name.Equal(current.Name) || !plan.Description.Equal(current.Description) || !plan.Enabled.Equal(current.Enabled)) {
-		resp.Diagnostics.AddError("Cannot change the workspace default keyset", "The plan changes the default keyset's name, description or enabled status. "+defaultKeysetOwnership+defaultKeysetRemoval)
 		return
 	}
 
@@ -167,6 +147,11 @@ func (r *keysetResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
+	if found.IsDefault {
+		resp.Diagnostics.AddError("Cannot manage the workspace default keyset", "This resource refers to the workspace default keyset, so refresh stopped and the keyset was not changed. "+defaultKeysetOwnership+defaultKeysetRemoval)
+		return
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, keysetModelFrom(*found))...)
 }
 
@@ -174,9 +159,23 @@ func (r *keysetResource) Update(ctx context.Context, req resource.UpdateRequest,
 	var plan, current keysetModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &current)...)
-	if !resp.Diagnostics.HasError() {
-		resp.Diagnostics.Append(r.applyChanges(ctx, plan, current, &resp.State)...)
+	if resp.Diagnostics.HasError() {
+		return
 	}
+
+	// Refresh refuses the default, but apply -refresh=false skips Read.
+	found, err := r.findKeyset(ctx, current.ID.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Cannot inspect keyset before update", operationError(err)+" The keyset was not changed.")
+		return
+	}
+
+	if found != nil && found.IsDefault {
+		resp.Diagnostics.AddError("Cannot manage the workspace default keyset", "The keyset was not changed. "+defaultKeysetOwnership+defaultKeysetRemoval)
+		return
+	}
+
+	resp.Diagnostics.Append(r.applyChanges(ctx, plan, current, &resp.State)...)
 }
 
 // Apply in-place changes both after creation and during Update. Persist each
@@ -346,6 +345,6 @@ func (r *keysetResource) findKeyset(ctx context.Context, id string) (*manage.Zer
 func keysetModelFrom(keyset manage.ZeroKMSKeyset) keysetModel {
 	return keysetModel{
 		ID: types.StringValue(keyset.ID), Name: types.StringValue(keyset.Name), Description: types.StringValue(keyset.Description),
-		Enabled: types.BoolValue(!keyset.IsDisabled), IsDefault: types.BoolValue(keyset.IsDefault),
+		Enabled: types.BoolValue(!keyset.IsDisabled),
 	}
 }
