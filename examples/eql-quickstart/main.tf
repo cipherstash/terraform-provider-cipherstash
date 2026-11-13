@@ -68,7 +68,7 @@ resource "cipherstash_cts_actor" "invoices_api" {
 
 resource "cipherstash_eql_v4" "invoices" {
   database = "invoices"
-  version  = "go-0.1.0-rc.3"
+  version  = "go-0.1.0-rc.4"
 }
 
 # The role the invoices service connects as.

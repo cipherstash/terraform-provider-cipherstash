@@ -33,7 +33,7 @@ Destroy uninstalls EQL in one transaction under the same lock. It refuses, chang
 ### Required
 
 - `database` (String) Name of the database to install EQL into, on the server from the provider's `database` settings. Changing this value replaces the resource: destroy uninstalls EQL from the old database, under the same refusals as any destroy, and create installs it in the new one.
-- `version` (String) EQL version to install, as `eql_v4.version()` reports it, such as `go-0.1.0-rc.3` for the installer released with cipherstash/stack Go v0.1.0-rc.3. It must be a version compiled into this provider: go-0.1.0-rc.2, go-0.1.0-rc.3. Refresh reads the installed version, so an installation changed outside Terraform shows as a difference. Changing it to a later version upgrades EQL; changing it to an earlier one is rejected.
+- `version` (String) EQL version to install, as `eql_v4.version()` reports it, such as `go-0.1.0-rc.4` for the installer released with cipherstash/stack Go v0.1.0-rc.4. It must be a version compiled into this provider: go-0.1.0-rc.3, go-0.1.0-rc.4. Refresh reads the installed version, so an installation changed outside Terraform shows as a difference. Changing it to a later version upgrades EQL; changing it to an earlier one is rejected.
 
 ### Optional
 

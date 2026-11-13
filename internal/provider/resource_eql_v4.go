@@ -68,7 +68,7 @@ func (r *eqlResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			},
 			"version": schema.StringAttribute{
 				Required:    true,
-				Description: "EQL version to install, as `eql_v4.version()` reports it, such as `go-0.1.0-rc.3` for the installer released with cipherstash/stack Go v0.1.0-rc.3. It must be a version compiled into this provider: " + strings.Join(eql.Versions(), ", ") + ". Refresh reads the installed version, so an installation changed outside Terraform shows as a difference. Changing it to a later version upgrades EQL; changing it to an earlier one is rejected.",
+				Description: "EQL version to install, as `eql_v4.version()` reports it, such as `go-0.1.0-rc.4` for the installer released with cipherstash/stack Go v0.1.0-rc.4. It must be a version compiled into this provider: " + strings.Join(eql.Versions(), ", ") + ". Refresh reads the installed version, so an installation changed outside Terraform shows as a difference. Changing it to a later version upgrades EQL; changing it to an earlier one is rejected.",
 				Validators:  []validator.String{stringvalidator.OneOf(eql.Versions()...)},
 			},
 			"require_ore": schema.BoolAttribute{

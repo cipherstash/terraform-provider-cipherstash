@@ -148,7 +148,7 @@ The lookup returns the client's `name`, `description`, and all granted `keyset_i
 
 ### Install EQL v4
 
-`cipherstash_eql_v4` installs EQL v4 into the database named by `database`, on the server from the provider's `database` settings. `version` must be a version compiled into the provider, such as `go-0.1.0-rc.3`; the provider contains each version's `eql-v4-install.sql` and `eql-v4-uninstall.sql` release assets byte for byte and checks them against their SHA-256 digests. Until cipherstash/stack publishes a stable Go release, the provider contains only the latest release candidate and the one before it.
+`cipherstash_eql_v4` installs EQL v4 into the database named by `database`, on the server from the provider's `database` settings. `version` must be a version compiled into the provider, such as `go-0.1.0-rc.4`; the provider contains each version's `eql-v4-install.sql` and `eql-v4-uninstall.sql` release assets byte for byte and checks them against their SHA-256 digests. Until cipherstash/stack publishes a stable Go release, the provider contains only the latest release candidate and the one before it.
 
 ```hcl
 resource "postgresql_extension" "pgcrypto" {
@@ -158,7 +158,7 @@ resource "postgresql_extension" "pgcrypto" {
 
 resource "cipherstash_eql_v4" "app" {
   database   = "app"
-  version    = "go-0.1.0-rc.3"
+  version    = "go-0.1.0-rc.4"
   depends_on = [postgresql_extension.pgcrypto]
 }
 ```
@@ -195,7 +195,7 @@ Change `version` to a later release and apply. Upgrades only move forward, in re
 ```hcl
 resource "cipherstash_eql_v4" "app" {
   database            = "app"
-  version             = "go-0.1.0-rc.3" # was go-0.1.0-rc.2
+  version             = "go-0.1.0-rc.4" # was go-0.1.0-rc.3
   allow_index_rebuild = true
   depends_on          = [postgresql_extension.pgcrypto]
 }
@@ -216,7 +216,7 @@ So a `postgresql_grant` on the schemas sees no drift. A `postgresql_grant` on ev
 
 The error names up to 20 of the objects involved.
 
-Plan a maintenance window. The install itself takes seconds, but before running the installer the upgrade locks every table whose indexes it rebuilds against reads and writes, until it commits. Queries lock a table before its indexes and the installer locks them the other way round, so locking the tables first makes the upgrade wait for running queries instead of deadlocking with them. With EQL indexes on more than one table, a transaction that reads several of them can still deadlock with the upgrade; PostgreSQL then rolls one of them back, and if that is the upgrade it changes nothing and can be retried. Waiting more than 5 seconds for a lock, or running one statement for more than 10 minutes, rolls the whole upgrade back. A reinstall holds about 9,300 locks for go-0.1.0-rc.3, so the lock table advice under [Uninstall EQL](#uninstall-eql) applies as well. To keep large tables available, [rebuild the indexes concurrently](#upgrade-eql-without-blocking-tables) instead.
+Plan a maintenance window. The install itself takes seconds, but before running the installer the upgrade locks every table whose indexes it rebuilds against reads and writes, until it commits. Queries lock a table before its indexes and the installer locks them the other way round, so locking the tables first makes the upgrade wait for running queries instead of deadlocking with them. With EQL indexes on more than one table, a transaction that reads several of them can still deadlock with the upgrade; PostgreSQL then rolls one of them back, and if that is the upgrade it changes nothing and can be retried. Waiting more than 5 seconds for a lock, or running one statement for more than 10 minutes, rolls the whole upgrade back. A reinstall holds about 9,300 locks for go-0.1.0-rc.4, so the lock table advice under [Uninstall EQL](#uninstall-eql) applies as well. To keep large tables available, [rebuild the indexes concurrently](#upgrade-eql-without-blocking-tables) instead.
 
 After an upgrade, or an upgrade by hand, reconnect the applications or run `DEALLOCATE ALL` in their sessions. The reinstall re-creates every EQL type under a new identifier, so a prepared statement whose parameter PostgreSQL typed as an EQL domain, such as `$1::eql_v4.query_text_eq`, fails with `cache lookup failed for type` until its connection prepares it again. Connection pools keep those statements, so recycle them too. Casting the parameter through `jsonb`, as in `$1::jsonb::eql_v4.query_text_eq`, avoids this.
 
@@ -303,7 +303,7 @@ The error names up to 20 of the columns or objects involved.
 
 Otherwise destroy runs that release's `eql-v4-uninstall.sql`, which drops the `eql_v4` and `eql_v4_internal` schemas with CASCADE, along with the grants and default privileges on them. Upstream deliberately leaves the column domains in `public`, so that columns survive a reinstall, together with three validator functions. Because destroy refuses while any column uses them, it then drops every `public.eql_v4_*` domain and function. It does so without CASCADE, so anything else that depends on one, such as a function that takes an EQL domain as an argument, makes the whole uninstall roll back. A later install then starts clean, with its own release's domains. `pgcrypto` and the `extensions` schema stay.
 
-An uninstall takes one lock per object it drops, about 6,200 for go-0.1.0-rc.3, and holds them until it commits. PostgreSQL's default lock table has 6,400 slots for the whole server (`max_locks_per_transaction` × `max_connections`), so on a busy server the uninstall can fail with "out of shared memory" and roll back. Uninstall when the server is quiet, or raise `max_locks_per_transaction`, which needs a restart, beforehand.
+An uninstall takes one lock per object it drops, about 6,200 for go-0.1.0-rc.4, and holds them until it commits. PostgreSQL's default lock table has 6,400 slots for the whole server (`max_locks_per_transaction` × `max_connections`), so on a busy server the uninstall can fail with "out of shared memory" and roll back. Uninstall when the server is quiet, or raise `max_locks_per_transaction`, which needs a restart, beforehand.
 
 Terraform destroys dependents first, so a `terraform destroy` of a root like the one above revokes the grants before uninstalling EQL. Changing `database` uninstalls EQL from the old database, under the same refusals, before installing it in the new one. `lifecycle { prevent_destroy = true }` rejects a destroy plan. To stop managing an installation without uninstalling it, use a `removed` block with `lifecycle { destroy = false }` or `terraform state rm`.
 
