@@ -26,7 +26,7 @@ The second connects to the database as the service's own role and asks which ver
 $ docker exec --env PGPASSWORD="${INVOICES_APP_PASSWORD?}" invoices-postgres \
     psql --host=127.0.0.1 --username=invoices_app --dbname=invoices \
     --tuples-only --no-align --command='SELECT eql_v4.version();'
-go-0.1.0-rc.3
+go-0.1.0-rc.4
 ```
 
 ## A few terms
@@ -257,10 +257,10 @@ resource "cipherstash_cts_actor" "invoices_api" {
 
 # Install EQL v4 into the invoices database. The provider contains the
 # installer for each supported version; this is the version that matches
-# release v0.1.0-rc.3 of CipherStash's Go library.
+# release v0.1.0-rc.4 of CipherStash's Go library.
 resource "cipherstash_eql_v4" "invoices" {
   database = "invoices"
-  version  = "go-0.1.0-rc.3"
+  version  = "go-0.1.0-rc.4"
 }
 
 output "app_environment" {
@@ -291,7 +291,7 @@ docker exec invoices-postgres \
   --tuples-only --no-align --command='SELECT eql_v4.version();'
 ```
 
-It should print `go-0.1.0-rc.3`. To see what EQL adds, create a table with an encrypted column. The `public.eql_v4_text_eq` type holds an encrypted string that can be compared for equality:
+It should print `go-0.1.0-rc.4`. To see what EQL adds, create a table with an encrypted column. The `public.eql_v4_text_eq` type holds an encrypted string that can be compared for equality:
 
 ```shell
 docker exec invoices-postgres \
@@ -386,7 +386,7 @@ resource "cipherstash_cts_actor" "invoices_api" {
 
 resource "cipherstash_eql_v4" "invoices" {
   database = "invoices"
-  version  = "go-0.1.0-rc.3"
+  version  = "go-0.1.0-rc.4"
 }
 
 # The role the invoices service connects as.
@@ -442,7 +442,7 @@ docker exec --env PGPASSWORD="${INVOICES_APP_PASSWORD?}" invoices-postgres \
   --tuples-only --no-align --command='SELECT eql_v4.version();'
 ```
 
-It should print `go-0.1.0-rc.3`. Without the grants, the same command fails with `permission denied for schema eql_v4`.
+It should print `go-0.1.0-rc.4`. Without the grants, the same command fails with `permission denied for schema eql_v4`.
 
 The invoices service now has everything it needs: the four `CS_*` variables to reach CipherStash, and a database role that can use EQL. The file from this step is the complete configuration.
 

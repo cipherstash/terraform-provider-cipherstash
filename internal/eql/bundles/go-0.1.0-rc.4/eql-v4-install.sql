@@ -320,7 +320,7 @@ END $$;
 --!
 --! This is a new domain family beside `public.eql_v4_json`, for documents
 --! Stack Encrypt's JSON index writes. It shares no wire shape and no SQL with
---! the SteVec surface. Four jsonb-backed domains (none over another domain,
+--! the SteVec surface. Five jsonb-backed domains (none over another domain,
 --! so the native-jsonb firewall in blockers.sql attaches):
 --!   - public.eql_v4_json_search — storage: an EQL envelope `{v, i, h, sv, q}`.
 --!   - public.eql_v4_json_entry  — one `sv` element (returned by `->`
@@ -329,6 +329,12 @@ END $$;
 --!                                    projection of the needle's selectors.
 --!   - eql_v4.query_json_leaf    — an ordering operand at a path: a
 --!                                    selector and a leaf ordering term.
+--!   - eql_v4.query_json_elements — an element-scoped predicate: per
+--!                                    member of an array's elements, the
+--!                                    member's read tokens and its bounds.
+--! A sixth, eql_v4.query_json_predicate, a boolean tree whose leaves
+--! are these operands, is in predicate.sql beside the function that reads
+--! it.
 --!
 --! The design is `docs/plans/2026-10-17-json-tree-index.md`
 --! at the repository root. The document's per-entry fields:
@@ -565,6 +571,25 @@ BEGIN
 END
 $$;
 
+--! @brief Validate an ordering operand at a JSON path.
+--! @internal
+--! @param val jsonb Candidate operand.
+--! @return boolean True when `val` is an object with string `s` and `op`
+--!         and no other key: the eql_v4.query_json_leaf CHECK, and each
+--!         bound of a eql_v4.query_json_elements member.
+CREATE OR REPLACE FUNCTION eql_v4_internal.json_tree_is_valid_leaf_query_payload(val jsonb)
+  RETURNS boolean
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+  SELECT COALESCE(
+    jsonb_typeof(val) = 'object'
+     AND jsonb_typeof(val -> 's') = 'string'
+     AND jsonb_typeof(val -> 'op') = 'string'
+     AND val - ARRAY['s', 'op']::text[] = '{}'::jsonb,
+    false
+  )
+$$;
+
 --! @brief Domain type for an ordering operand at a JSON path.
 --!
 --! `{"s": "…", "op": "…"}`: the path's selector, which `->` takes, and the
@@ -583,17 +608,139 @@ BEGIN
     CREATE DOMAIN eql_v4.query_json_leaf AS jsonb
       CHECK (
         VALUE IS NULL
-        OR COALESCE(
-          jsonb_typeof(VALUE) = 'object'
-           AND jsonb_typeof(VALUE -> 's') = 'string'
-           AND jsonb_typeof(VALUE -> 'op') = 'string'
-           AND VALUE - ARRAY['s', 'op']::text[] = '{}'::jsonb,
-          false
-        )
+        OR eql_v4_internal.json_tree_is_valid_leaf_query_payload(VALUE)
       );
   END IF;
 
   COMMENT ON DOMAIN eql_v4.query_json_leaf IS 'EQL JSON tree query operand (ordering at a path)';
+END
+$$;
+
+--! @brief Validate the bounds of an ordering at one path.
+--! @internal
+--!
+--! Bounds are `{"gt" | "gte": leaf, "lt" | "lte": leaf}`: one or two
+--! ordering operands of the shape `eql_v4.query_json_leaf` holds
+--! (`{"s", "op"}`). At most one lower bound (`gt` or `gte`) and at most one
+--! upper (`lt` or `lte`), at least one in all, and every bound at the one
+--! selector: the path's. A member of an element-scoped predicate is bounds
+--! with its tokens beside them, and the `cmp` leaf of a
+--! `eql_v4.query_json_predicate` is bounds alone.
+--!
+--! @param val jsonb Candidate bounds.
+--! @return boolean True when `val` is bounds.
+--! @note plpgsql, for the subqueries over the bounds, which a CHECK
+--!       expression cannot hold.
+CREATE OR REPLACE FUNCTION eql_v4_internal.json_tree_is_valid_bounds(val jsonb)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+BEGIN
+  RETURN COALESCE(
+    jsonb_typeof(val) = 'object'
+     AND val - ARRAY['gt', 'gte', 'lt', 'lte']::text[] = '{}'::jsonb
+     AND val ?| ARRAY['gt', 'gte', 'lt', 'lte']::text[]
+     AND NOT (val ? 'gt' AND val ? 'gte')
+     AND NOT (val ? 'lt' AND val ? 'lte')
+     -- Each bound by the `eql_v4.query_json_leaf` CHECK's own rule.
+     AND NOT EXISTS (
+       SELECT 1 FROM jsonb_each(val) AS bound
+       WHERE NOT eql_v4_internal.json_tree_is_valid_leaf_query_payload(bound.value)
+     )
+     AND (SELECT count(DISTINCT bound.value ->> 's') FROM jsonb_each(val) AS bound) = 1,
+    false
+  );
+END;
+$$;
+
+--! @brief Validate one member of an element-scoped predicate.
+--! @internal
+--!
+--! A member is `{"t": ["…", …], "gt" | "gte": leaf, "lt" | "lte": leaf}`:
+--! the tokens of a read of the member's path, one per element below the
+--! wildcard bound in element order and then the probe, and the bounds of
+--! the member's path beside them, as
+--! eql_v4_internal.json_tree_is_valid_bounds validates them.
+--!
+--! @param val jsonb Candidate member.
+--! @return boolean True when `val` is a member.
+--! @note plpgsql, for the subquery over the tokens, which a CHECK
+--!       expression cannot hold.
+CREATE OR REPLACE FUNCTION eql_v4_internal.json_tree_is_valid_elements_member(val jsonb)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+BEGIN
+  RETURN COALESCE(
+    jsonb_typeof(val) = 'object'
+     AND jsonb_typeof(val -> 't') = 'array'
+     AND jsonb_array_length(val -> 't') >= 1
+     AND NOT EXISTS (
+       SELECT 1 FROM jsonb_array_elements(val -> 't') AS token
+       WHERE jsonb_typeof(token) <> 'string'
+     )
+     AND eql_v4_internal.json_tree_is_valid_bounds(val - 't'),
+    false
+  );
+END;
+$$;
+
+--! @brief Validate an element-scoped predicate.
+--! @internal
+--! @param val jsonb Candidate predicate.
+--! @return boolean True when `val` is `{"m": [member, …]}`, at least one
+--!         member, each valid, every member's tokens as many as every
+--!         other's: one wildcard expansion, at one bound, under each.
+--! @see eql_v4_internal.json_tree_is_valid_elements_member
+CREATE OR REPLACE FUNCTION eql_v4_internal.json_tree_is_valid_elements_payload(val jsonb)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+BEGIN
+  RETURN COALESCE(
+    jsonb_typeof(val) = 'object'
+     AND val - 'm' = '{}'::jsonb
+     AND jsonb_typeof(val -> 'm') = 'array'
+     AND jsonb_array_length(val -> 'm') >= 1
+     AND NOT EXISTS (
+       SELECT 1 FROM jsonb_array_elements(val -> 'm') AS member
+       WHERE NOT eql_v4_internal.json_tree_is_valid_elements_member(member)
+     )
+     AND (SELECT count(DISTINCT jsonb_array_length(member -> 't'))
+          FROM jsonb_array_elements(val -> 'm') AS member) = 1,
+    false
+  );
+END;
+$$;
+
+--! @brief Domain type for an element-scoped predicate over an array.
+--!
+--! `{"m": [{"t": ["…", …], "gte": {"s", "op"}, "lte": {"s", "op"}}, …]}`:
+--! one member per field of an element the predicate tests, each the
+--! tokens of a subtree read of that field's path through the array's
+--! wildcard and the field's bounds, as Stack Encrypt's `element_match`
+--! operator derives them. eql_v4.json_tree_element_match reads it: some
+--! one element of the array satisfies every member's bounds. A member
+--! carries `gt` or `gte` for a lower bound and `lt` or `lte` for an upper
+--! one, each the ordering operand eql_v4.query_json_leaf holds; an
+--! equality is `gte` and `lte` at one value.
+--!
+--! @note Construct from inline JSON via the DOMAIN cast:
+--!       `'{"m":[{"t":["…"],"gt":{"s":"…","op":"…"}}]}'::eql_v4.query_json_elements`.
+--! @see eql_v4.json_tree_element_match
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type
+    WHERE typname = 'query_json_elements' AND typnamespace = 'eql_v4'::regnamespace
+  ) THEN
+    CREATE DOMAIN eql_v4.query_json_elements AS jsonb
+      CHECK (
+        eql_v4_internal.json_tree_is_valid_elements_payload(VALUE)
+      );
+  END IF;
+
+  COMMENT ON DOMAIN eql_v4.query_json_elements IS 'EQL JSON tree query operand (element-scoped predicate)';
 END
 $$;
 
@@ -1017,7 +1164,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1035,7 +1184,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1055,7 +1206,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1075,7 +1228,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1095,7 +1250,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1129,7 +1286,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1149,7 +1308,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1169,7 +1330,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1189,7 +1352,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1214,7 +1379,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1239,7 +1406,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1257,7 +1426,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1277,7 +1448,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1297,7 +1470,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1317,7 +1492,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1351,7 +1528,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1371,7 +1550,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1391,7 +1572,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1411,7 +1594,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1436,7 +1621,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1454,7 +1641,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1474,7 +1663,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1494,7 +1685,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1514,7 +1707,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1548,7 +1743,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1568,7 +1765,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1588,7 +1787,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -1608,7 +1809,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -6456,7 +6659,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -6474,7 +6679,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -6494,7 +6701,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -6514,7 +6723,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -6534,7 +6745,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -7469,7 +7682,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -7489,7 +7704,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -7509,7 +7726,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -7529,7 +7748,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -7554,7 +7775,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -8480,7 +8703,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -8498,7 +8723,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -8518,7 +8745,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -8538,7 +8767,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -8558,7 +8789,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9493,7 +9726,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9513,7 +9748,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9533,7 +9770,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9553,7 +9792,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9587,7 +9828,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9607,7 +9850,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9627,7 +9872,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9647,7 +9894,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9672,7 +9921,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9690,7 +9941,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9710,7 +9963,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9730,7 +9985,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -9750,7 +10007,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10685,7 +10944,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10705,7 +10966,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10725,7 +10988,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10745,7 +11010,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10770,7 +11037,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10788,7 +11057,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10808,7 +11079,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10828,7 +11101,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -10848,7 +11123,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11783,7 +12060,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11801,7 +12080,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'bf'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11822,7 +12103,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11843,7 +12126,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11864,7 +12149,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11884,7 +12171,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND (NOT (VALUE ? 'ob') OR (jsonb_typeof(VALUE -> 'ob') = 'string'
           AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')))
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11904,7 +12193,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND (NOT (VALUE ? 'op') OR (jsonb_typeof(VALUE -> 'op') = 'string'
           AND left(VALUE ->> 'op', 2) IN ('00', '01')))
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11929,7 +12220,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11947,7 +12240,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11965,7 +12260,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'bf'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -11986,7 +12283,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -12007,7 +12306,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -12028,7 +12329,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -12050,7 +12353,9 @@ BEGIN
         AND VALUE ? 'bf'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -12072,7 +12377,9 @@ BEGIN
         AND VALUE ? 'bf'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13007,7 +13314,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'hm'
         AND NOT (VALUE ? 'c')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13027,7 +13336,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13047,7 +13358,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13067,7 +13380,9 @@ BEGIN
         AND NOT (VALUE ? 'c')
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13092,7 +13407,9 @@ BEGIN
         AND VALUE ? 'v'
         AND VALUE ? 'i'
         AND VALUE ? 'c'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13110,7 +13427,9 @@ BEGIN
         AND VALUE ? 'i'
         AND VALUE ? 'c'
         AND VALUE ? 'hm'
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13130,7 +13449,9 @@ BEGIN
         AND VALUE ? 'ob'
         AND jsonb_typeof(VALUE -> 'ob') = 'string'
         AND left(VALUE ->> 'ob', 4) IN ('0202', '0203')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13150,7 +13471,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -13170,7 +13493,9 @@ BEGIN
         AND VALUE ? 'op'
         AND jsonb_typeof(VALUE -> 'op') = 'string'
         AND left(VALUE ->> 'op', 2) IN ('00', '01')
-        AND VALUE->>'v' = '4'
+        -- `"v": null` makes the comparison NULL, and a CHECK that is NULL
+        -- passes, so COALESCE refuses it. A NULL value still passes.
+        AND COALESCE(VALUE->>'v' = '4', VALUE IS NULL)
       );
   END IF;
 
@@ -24384,51 +24709,34 @@ AS $$
   FROM doc
 $$;
 
---! @brief The nodes the tokens name, each with everything beneath it, as
---!        rows: the subtree read, in core SQL.
+--! @brief The subtree read, each row with the place in `tokens` of the
+--!        token whose node it sits in.
 --!
---! For each token in turn, the entry whose self tag is the token's, at
---! `d = 0`, then its descendants, each with `d` its depth below that entry,
---! found by probing the ordinals under each node in hand until the first
---! miss and recursing under each hit's own token. So a read returns the
---! node it names, and `{}`, `[]`, a scalar and an absent node are an empty
---! object's entry, an empty array's entry, the scalar's entry and no rows,
---! the four answers `jsonb #>` gives. Rows come out in no promised order:
---! the client places each one by its tags and checks it under its parent's
---! digest, so the order they arrive in carries nothing. A token that names
---! no node yields no row, and nothing in a row is linkable to anything without its token.
---! The client sends one token for a path with no wildcard, and for a
---! wildcard one per position below its bound and a probe at the bound. The
---! server treats a probe like any other token, but can pick it out: it is
---! the last token of its level, the token count gives the bound away, and
---! a hit on it carries the element's selector rather than the leaf's.
---! Wanting a whole array is a read of the array's path, which sends the
---! array's own token.
---!
---! **The budget.** A read returns about two hundred characters per entry,
---! where a sealed root holds the whole document in one ciphertext of about
---! the plaintext's size. So when the root is sealed and the read would
---! return more than `budget` rows, counted across all the tokens and the
---! nodes at `d = 0` included, it stops and returns the root entry alone,
---! with `d = 0`: the client opens it to the whole document and evaluates
---! the same paths over it, which is cheaper on both sides than the read
---! past that point. The default of 64 is past the crossover by bytes
---! (about a dozen entries) by a margin that keeps a small subtree arriving
---! as the entries it is. A `budget` of `0` never falls back. Tokens that
---! name no node yield no row under any budget, and a document whose root
---! is not sealed is always read in full, since its root holds no document
---! to return.
+--! The read eql_v4.json_tree_subtree describes, returning `k` beside
+--! each row: `1` for the first token of `tokens`, `2` for the second, as
+--! `unnest … WITH ORDINALITY` numbers them, for the node a token names and
+--! for every row beneath it. `k` is a place in the caller's array and
+--! nothing more: what it means is what the caller's order means. A client
+--! expands a wildcard (`$.items[*].price`) into one token per position in
+--! element order, `$.items[0].price` first, then the probe for the element
+--! at the bound, so for such a read `k` is the element's position plus
+--! one, and two reads expanded to the same bound over two paths below one
+--! array (`$.items[*].price`, `$.items[*].sku`) agree on `k` for the same
+--! element: a join on `k` pairs the fields of one element. Past the budget,
+--! the root entry comes back alone with `k = 0`, as its `j` is: no token
+--! found it.
 --!
 --! @param e public.eql_v4_json_search The stored document.
 --! @param tokens text[] The tokens of the nodes to read, base64, each
 --!        derived by the client from a concrete path alone.
 --! @param budget integer The most rows to return before falling back to
 --!        the sealed root; `0` to always read in full. Default 64.
---! @return SETOF public.eql_v4_json_entry The rows, each with its
---!         depth `d` below the node its token named; or the root entry
---!         alone, with `j = 0` and `d = 0`, past the budget.
-CREATE FUNCTION eql_v4.json_tree_subtree(e public.eql_v4_json_search, tokens text[], budget integer DEFAULT 64)
-  RETURNS SETOF public.eql_v4_json_entry
+--! @return TABLE(k integer, entry public.eql_v4_json_entry) The rows,
+--!         ordered by `k`, each entry with its depth `d` below the node its
+--!         token named; or the root entry alone, with `k = 0`, `j = 0` and
+--!         `d = 0`, past the budget.
+CREATE FUNCTION eql_v4.json_tree_subtree_indexed(e public.eql_v4_json_search, tokens text[], budget integer DEFAULT 64)
+  RETURNS TABLE(k integer, entry public.eql_v4_json_entry)
   LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
 AS $$
   WITH RECURSIVE
@@ -24507,7 +24815,7 @@ AS $$
     over AS MATERIALIZED (
       SELECT doc.capped AND (SELECT count(*) FROM found) > budget AS fallback FROM doc
     )
-  SELECT rows.entry
+  SELECT rows.k::integer, rows.entry
   FROM (
     SELECT 0::bigint AS k, 0 AS j,
            (doc.meta || (doc.sv -> 0) || '{"j": 0, "d": 0}'::jsonb)::public.eql_v4_json_entry AS entry
@@ -24520,6 +24828,62 @@ AS $$
     WHERE NOT over.fallback
   ) AS rows
   ORDER BY rows.k, rows.j
+$$;
+
+--! @brief The nodes the tokens name, each with everything beneath it, as
+--!        rows: the subtree read, in core SQL.
+--!
+--! For each token in turn, the entry whose self tag is the token's, at
+--! `d = 0`, then its descendants, each with `d` its depth below that entry,
+--! found by probing the ordinals under each node in hand until the first
+--! miss and recursing under each hit's own token. So a read returns the
+--! node it names, and `{}`, `[]`, a scalar and an absent node are an empty
+--! object's entry, an empty array's entry, the scalar's entry and no rows,
+--! the four answers `jsonb #>` gives. Rows come out in no promised order:
+--! the client places each one by its tags and checks it under its parent's
+--! digest, so the order they arrive in carries nothing. A token that names
+--! no node yields no row, and nothing in a row is linkable to anything without its token.
+--! The client sends one token for a path with no wildcard, and for a
+--! wildcard one per position below its bound and a probe at the bound. The
+--! server treats a probe like any other token, but can pick it out: it is
+--! the last token of its level, the token count gives the bound away, and
+--! a hit on it carries the element's selector rather than the leaf's.
+--! Wanting a whole array is a read of the array's path, which sends the
+--! array's own token.
+--!
+--! **The budget.** A read returns about two hundred characters per entry,
+--! where a sealed root holds the whole document in one ciphertext of about
+--! the plaintext's size. So when the root is sealed and the read would
+--! return more than `budget` rows, counted across all the tokens and the
+--! nodes at `d = 0` included, it stops and returns the root entry alone,
+--! with `d = 0`: the client opens it to the whole document and evaluates
+--! the same paths over it, which is cheaper on both sides than the read
+--! past that point. The default of 64 is past the crossover by bytes
+--! (about a dozen entries) by a margin that keeps a small subtree arriving
+--! as the entries it is. A `budget` of `0` never falls back. Tokens that
+--! name no node yield no row under any budget, and a document whose root
+--! is not sealed is always read in full, since its root holds no document
+--! to return.
+--!
+--! The rows are eql_v4.json_tree_subtree_indexed's, without the place
+--! of the token that found each: one implementation, so the two reads
+--! cannot disagree.
+--!
+--! @param e public.eql_v4_json_search The stored document.
+--! @param tokens text[] The tokens of the nodes to read, base64, each
+--!        derived by the client from a concrete path alone.
+--! @param budget integer The most rows to return before falling back to
+--!        the sealed root; `0` to always read in full. Default 64.
+--! @return SETOF public.eql_v4_json_entry The rows, each with its
+--!         depth `d` below the node its token named; or the root entry
+--!         alone, with `j = 0` and `d = 0`, past the budget.
+--! @see eql_v4.json_tree_subtree_indexed
+CREATE FUNCTION eql_v4.json_tree_subtree(e public.eql_v4_json_search, tokens text[], budget integer DEFAULT 64)
+  RETURNS SETOF public.eql_v4_json_entry
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+  SELECT r.entry
+  FROM eql_v4.json_tree_subtree_indexed(e, tokens, budget) AS r
 $$;
 
 ------------------------------------------------------------------------------
@@ -24903,6 +25267,449 @@ CREATE OPERATOR >= (
   NEGATOR  = <,
   RESTRICT = scalargesel,
   JOIN     = scalargejoinsel
+);
+-- ONLY EQL VERSION: 4
+
+--! @file v3/json_tree/elements.sql
+--! @brief Element-scoped predicates on public.eql_v4_json_search: tests
+--!        that one element of an array satisfies them all.
+
+--! @brief Whether an entry is inside every bound of an ordering at one
+--!        path: what an element predicate's member and a compiled
+--!        predicate's `cmp` leaf each test of the entry they find.
+--! @internal
+--!
+--! `gt` by `>`, `gte` by `>=`, `lt` by `<` and `lte` by `<=`, the ordering
+--! operators an entry has against a eql_v4.query_json_leaf, joined by
+--! SQL `AND`; a bound `bounds` does not carry is no test. So it is NULL
+--! where a bound's comparison is: an entry that is NULL (no node at the
+--! path) or has no ordering term.
+--!
+--! @param entry public.eql_v4_json_entry The entry.
+--! @param bounds jsonb Bounds, as eql_v4_internal.json_tree_is_valid_bounds
+--!        validates them; other keys (a member's `t`) are not read.
+--! @return boolean Whether the entry satisfies every bound.
+--! @note LANGUAGE sql and not STRICT, so it inlines into its callers.
+CREATE FUNCTION eql_v4_internal.json_tree_within_bounds(entry public.eql_v4_json_entry, bounds jsonb)
+  RETURNS boolean
+  LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$
+  SELECT (NOT bounds ? 'gt' OR eql_v4.gt(entry, (bounds -> 'gt')::eql_v4.query_json_leaf))
+     AND (NOT bounds ? 'gte' OR eql_v4.gte(entry, (bounds -> 'gte')::eql_v4.query_json_leaf))
+     AND (NOT bounds ? 'lt' OR eql_v4.lt(entry, (bounds -> 'lt')::eql_v4.query_json_leaf))
+     AND (NOT bounds ? 'lte' OR eql_v4.lte(entry, (bounds -> 'lte')::eql_v4.query_json_leaf))
+$$;
+
+--! @brief eql_v4.json_tree_element_match over a document already opened
+--!        and indexed: what that function and eql_v4.json_tree_match
+--!        each call, so a predicate with several element-scoped leaves
+--!        opens and indexes its row once.
+--! @internal
+--! @param iv bytea The document's `iv`, which salts its self tags.
+--! @param sv jsonb The document's entries.
+--! @param tags jsonb The document's self tags, each mapped to the entry's
+--!        ordinal in `sv`: the `nodes` eql_v4_internal.json_tree_index
+--!        builds.
+--! @param p jsonb The predicate, a valid eql_v4.query_json_elements.
+--! @return boolean As eql_v4.json_tree_element_match.
+--! @throws invalid_parameter_value As eql_v4.json_tree_element_match.
+CREATE FUNCTION eql_v4_internal.json_tree_element_match_opened(iv bytea, sv jsonb, tags jsonb, p jsonb)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+DECLARE
+  truncated boolean;
+  matched boolean;
+BEGIN
+  WITH
+    member AS MATERIALIZED (
+      SELECT m.i,
+             m.v,
+             -- The selector of the member's field: every bound carries it.
+             COALESCE(m.v -> 'gt', m.v -> 'gte', m.v -> 'lt', m.v -> 'lte') ->> 's' AS s
+      FROM jsonb_array_elements(p -> 'm') WITH ORDINALITY AS m(v, i)
+    ),
+    -- The node each member's `k`-th token names, by its self tag; a token
+    -- that names none yields no row.
+    node AS MATERIALIZED (
+      SELECT member.i, member.v, member.s, t.k, sv -> found.j AS entry
+      FROM member
+      CROSS JOIN LATERAL jsonb_array_elements_text(member.v -> 't') WITH ORDINALITY AS t(token, k)
+      CROSS JOIN LATERAL (
+        SELECT (tags ->> eql_v4_internal.json_tree_self_tag(iv, decode(t.token, 'base64')))::integer AS j
+      ) AS found
+      WHERE found.j IS NOT NULL
+    ),
+    satisfied AS (
+      SELECT node.k
+      FROM node
+      CROSS JOIN LATERAL (SELECT node.entry::public.eql_v4_json_entry AS entry) AS typed
+      WHERE node.entry ->> 's' = node.s
+        AND eql_v4_internal.json_tree_within_bounds(typed.entry, node.v)
+      GROUP BY node.k
+      HAVING count(DISTINCT node.i) = (SELECT count(*) FROM member)
+    )
+  SELECT EXISTS (SELECT 1 FROM node WHERE node.entry ->> 's' IS DISTINCT FROM node.s),
+         EXISTS (SELECT 1 FROM satisfied)
+  INTO truncated, matched;
+
+  IF truncated THEN
+    RAISE EXCEPTION 'an array the element predicate reads is longer than the bound it was derived to, so the predicate would answer over part of it'
+      USING ERRCODE = 'invalid_parameter_value',
+            HINT = 'Derive the predicate (element_match) with a wildcard_bound past the longest array.';
+  END IF;
+  RETURN matched;
+END;
+$$;
+
+--! @brief Whether some one element of an array in the document satisfies
+--!        every member of an element-scoped predicate.
+--!
+--! The jsonpath `exists($.contacts[*] ? (@.relationship == $a &&
+--! @.calls > $b))`: one element where both hold, which `@>` and an
+--! ordering over `eql_v4.json_tree_path_query` cannot say together,
+--! since each can be answered by a different element. Each member of
+--! `p` holds the tokens of a subtree read of one field's path through the
+--! array (`$.contacts[*].relationship`), in element order to one bound,
+--! and that field's bounds. The function opens the document once, finds
+--! the node each token of every member names, as
+--! eql_v4.json_tree_subtree_indexed finds a token's node at `d = 0`
+--! (by its self tag), and pairs the members' nodes by `k`, the token's
+--! place in its member's array: the members' tokens were expanded to the
+--! same bound in the same order, so one `k` is one element. Nothing
+--! beneath a node is read: a member compares its field's own entry. It is true when some `k` has a node for every
+--! member and each node satisfies its member's bounds, compared by the
+--! ordering operators an entry has against a eql_v4.query_json_leaf:
+--! `gt` by `>`, `gte` by `>=`, `lt` by `<`, `lte` by `<=`. An element where
+--! a member's field is absent, or holds no ordering term (a container, a
+--! boolean, a null), satisfies no bound of that member.
+--!
+--! **The probe.** Each member's tokens end with a probe: the token of the
+--! element at the bound itself, which a document holds only when its array
+--! is longer than the bound. A read finds the probe's node like any other,
+--! and it is told apart by its selector: the element's, where every other
+--! token names a node at the member's field, whose selector is the one the
+--! member's bounds carry. A predicate over part of an array would answer
+--! false for a row where an element past the bound matches, so a probe that
+--! names a node raises rather than answer: derive the predicate with a
+--! bound past the longest array, as a subtree read is raised.
+--!
+--! Equality rides on the ordering term, as `gte` and `lte` at one value, so
+--! it is what the term compares: text case- and accent-folded, and numbers
+--! as float64, so integers past 2^53 can tie. Containment (`@>`) is exact.
+--!
+--! @param e public.eql_v4_json_search The stored document.
+--! @param p eql_v4.query_json_elements The predicate.
+--! @return boolean True when one element satisfies every member; NULL when
+--!         either argument is NULL.
+--! @throws invalid_parameter_value when a member's probe names a node: the
+--!         array is longer than the bound the predicate was derived to.
+--! @note plpgsql, to raise, and so opaque to the planner: the call filters
+--!       a scan, as a subtree read in a predicate does. Narrow the rows with
+--!       an indexed predicate first, such as `@>` on the same values.
+--! @see eql_v4_internal.json_tree_element_match_opened
+CREATE FUNCTION eql_v4.json_tree_element_match(e public.eql_v4_json_search, p eql_v4.query_json_elements)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+DECLARE
+  -- The document, decompressed once.
+  d jsonb := e::jsonb #> '{}'::text[];
+  tags jsonb;
+BEGIN
+  SELECT idx.nodes INTO tags FROM eql_v4_internal.json_tree_index(d) AS idx;
+  RETURN eql_v4_internal.json_tree_element_match_opened(
+    eql_v4_internal.json_tree_iv(d ->> 'h'), d -> 'sv', tags, p::jsonb);
+END;
+$$;
+-- ONLY EQL VERSION: 4
+
+--! @file v3/json_tree/predicate.sql
+--! @brief A compiled predicate on public.eql_v4_json_search: a boolean
+--!        tree of the family's query operands, bound as one parameter and
+--!        evaluated by eql_v4.json_tree_match or `@@`.
+--!
+--! A filter compiler that targets plaintext `jsonb_path_match(col, $1, $2)`
+--! binds one predicate and its values. The database cannot evaluate a
+--! jsonpath over ciphertext, so Stack Encrypt's `match` operator compiles
+--! the jsonpath on the client into this tree, whose leaves are the operands
+--! the family's operators already take, and the server evaluates the tree.
+--!
+--! @note The tree is evaluated inside a function, which is opaque to the
+--!       planner: `col @@ $1` filters a scan, and engages no index. The
+--!       operators the leaves stand for, written out in the WHERE clause
+--!       (`col @> $1`, `(col -> $2) < $3`), engage the GIN and btree indexes
+--!       and are the fast path.
+
+--! @brief Validate a compiled predicate, recursively.
+--! @internal
+--!
+--! A node is an object of exactly one key, which names its kind:
+--!   - `{"and": [node, …]}`, `{"or": [node, …]}`: at least one node;
+--!   - `{"not": node}`;
+--!   - `{"contains": needle}`: a containment needle, as
+--!     public.eql_v4_is_valid_json_tree_query_payload validates the
+--!     eql_v4.query_json CHECK;
+--!   - `{"exists": "…"}`: a path selector, base64;
+--!   - `{"cmp": bounds}`: one or two ordering operands at one selector, as
+--!     eql_v4_internal.json_tree_is_valid_bounds validates them;
+--!   - `{"elements": predicate}`: an element-scoped predicate, as
+--!     eql_v4_internal.json_tree_is_valid_elements_payload validates the
+--!     eql_v4.query_json_elements CHECK.
+--!
+--! @param val jsonb Candidate node.
+--! @return boolean True when `val` is a node.
+--! @note plpgsql: the recursion and the subqueries over the children cannot
+--!       be written as a CHECK expression.
+CREATE OR REPLACE FUNCTION eql_v4_internal.json_tree_is_valid_predicate_payload(val jsonb)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+DECLARE
+  kind text;
+BEGIN
+  IF jsonb_typeof(val) IS DISTINCT FROM 'object'
+     OR (SELECT count(*) FROM jsonb_object_keys(val)) <> 1 THEN
+    RETURN false;
+  END IF;
+  SELECT key INTO kind FROM jsonb_object_keys(val) AS key;
+  RETURN COALESCE(
+    CASE kind
+      WHEN 'and' THEN
+        jsonb_typeof(val -> 'and') = 'array'
+        AND jsonb_array_length(val -> 'and') >= 1
+        AND NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(val -> 'and') AS child
+          WHERE NOT eql_v4_internal.json_tree_is_valid_predicate_payload(child)
+        )
+      WHEN 'or' THEN
+        jsonb_typeof(val -> 'or') = 'array'
+        AND jsonb_array_length(val -> 'or') >= 1
+        AND NOT EXISTS (
+          SELECT 1 FROM jsonb_array_elements(val -> 'or') AS child
+          WHERE NOT eql_v4_internal.json_tree_is_valid_predicate_payload(child)
+        )
+      WHEN 'not' THEN
+        eql_v4_internal.json_tree_is_valid_predicate_payload(val -> 'not')
+      WHEN 'contains' THEN
+        public.eql_v4_is_valid_json_tree_query_payload(val -> 'contains')
+      WHEN 'exists' THEN
+        jsonb_typeof(val -> 'exists') = 'string'
+      WHEN 'cmp' THEN
+        eql_v4_internal.json_tree_is_valid_bounds(val -> 'cmp')
+      WHEN 'elements' THEN
+        eql_v4_internal.json_tree_is_valid_elements_payload(val -> 'elements')
+      ELSE false
+    END,
+    false
+  );
+END;
+$$;
+
+--! @brief Domain type for a compiled predicate on a JSON tree document.
+--!
+--! A boolean tree, serialised as JSON, whose leaves are the family's query
+--! operands, as Stack Encrypt's `match` operator compiles a jsonpath
+--! predicate into it:
+--!   - `{"and": [node, …]}`, `{"or": [node, …]}`, `{"not": node}`;
+--!   - `{"contains": eql_v4.query_json}`: the document contains the
+--!     needle, `col @> needle`;
+--!   - `{"exists": selector}`: the document has a node at the path,
+--!     `eql_v4.json_tree_path_exists(col, selector)`;
+--!   - `{"cmp": {"gt" | "gte": leaf, "lt" | "lte": leaf}}`: the first entry
+--!     at the bounds' selector against each bound, each leaf a
+--!     eql_v4.query_json_leaf, `(col -> s) > gt AND (col -> s) < lt`;
+--!   - `{"elements": eql_v4.query_json_elements}`: one element of an
+--!     array satisfies every member,
+--!     `eql_v4.json_tree_element_match(col, elements)`.
+--! eql_v4.json_tree_match reads it.
+--!
+--! @note Construct from inline JSON via the DOMAIN cast:
+--!       `'{"and":[{"exists":"…"},{"contains":{"sv":[…],"el":[]}}]}'::eql_v4.query_json_predicate`.
+--!       An untyped literal on the right of `@@` does not resolve to the
+--!       domain: write the cast, `col @@ $1::eql_v4.query_json_predicate`.
+--! @see eql_v4.json_tree_match
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_type
+    WHERE typname = 'query_json_predicate' AND typnamespace = 'eql_v4'::regnamespace
+  ) THEN
+    CREATE DOMAIN eql_v4.query_json_predicate AS jsonb
+      CHECK (
+        eql_v4_internal.json_tree_is_valid_predicate_payload(VALUE)
+      );
+  END IF;
+
+  COMMENT ON DOMAIN eql_v4.query_json_predicate IS 'EQL JSON tree query operand (compiled predicate)';
+END
+$$;
+
+--! @brief One node of a compiled predicate, over a document already opened.
+--! @internal
+--!
+--! `and`, `or` and `not` follow SQL's three-valued logic, as the operators
+--! the leaves stand for would combine in a hand-written WHERE: `and` is
+--! false when a child is false, else NULL when a child is NULL, else true;
+--! `or` the dual; `not` NULL of NULL. Children are read in order and the
+--! read stops at the first child that decides the answer, so an element
+--! leaf the answer does not depend on is not read and cannot raise.
+--!
+--! Each leaf answers as its operator does on the column:
+--!   - `contains`: native `jsonb @>` of the document's projection over the
+--!     needle, and over its `alt` when it carries one, the rule
+--!     eql_v4.json_tree_contains applies (`col @> needle`), here over
+--!     the projection the caller read once;
+--!   - `exists`: eql_v4.json_tree_path_exists;
+--!   - `cmp`: the first entry at the selector,
+--!     eql_v4.json_tree_path_query_first (what `col -> s` returns),
+--!     against its bounds by eql_v4_internal.json_tree_within_bounds,
+--!     as an element member's entry is: NULL when the document has no node
+--!     at the path or the node has no ordering term;
+--!   - `elements`: eql_v4_internal.json_tree_element_match_opened over
+--!     the index the caller built once.
+--!
+--! @param d jsonb The document, decompressed.
+--! @param sv jsonb Its entries, or NULL when the predicate has no element
+--!        leaf.
+--! @param q jsonb Its containment projection.
+--! @param iv bytea Its `iv`, or NULL when the predicate has no element
+--!        leaf.
+--! @param tags jsonb Its self tags, as eql_v4_internal.json_tree_index
+--!        builds them, or NULL when the predicate has no element leaf.
+--! @param node jsonb The node, valid.
+--! @return boolean The node's answer: true, false or NULL.
+--! @throws invalid_parameter_value As eql_v4.json_tree_element_match,
+--!         from an element leaf that is read.
+--! @note Not STRICT: the parts a predicate does not need are NULL.
+CREATE FUNCTION eql_v4_internal.json_tree_match_node(d jsonb, sv jsonb, q jsonb, iv bytea, tags jsonb, node jsonb)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+AS $$
+DECLARE
+  child jsonb;
+  answer boolean;
+  result boolean;
+  needle jsonb;
+  bounds jsonb;
+  entry public.eql_v4_json_entry;
+BEGIN
+  IF node ? 'and' THEN
+    result := true;
+    FOR child IN SELECT jsonb_array_elements(node -> 'and') LOOP
+      answer := eql_v4_internal.json_tree_match_node(d, sv, q, iv, tags, child);
+      IF answer IS FALSE THEN
+        RETURN false;
+      ELSIF answer IS NULL THEN
+        result := NULL;
+      END IF;
+    END LOOP;
+    RETURN result;
+  ELSIF node ? 'or' THEN
+    result := false;
+    FOR child IN SELECT jsonb_array_elements(node -> 'or') LOOP
+      answer := eql_v4_internal.json_tree_match_node(d, sv, q, iv, tags, child);
+      IF answer IS TRUE THEN
+        RETURN true;
+      ELSIF answer IS NULL THEN
+        result := NULL;
+      END IF;
+    END LOOP;
+    RETURN result;
+  ELSIF node ? 'not' THEN
+    RETURN NOT eql_v4_internal.json_tree_match_node(d, sv, q, iv, tags, node -> 'not');
+  ELSIF node ? 'contains' THEN
+    needle := node -> 'contains';
+    RETURN q @> (needle - 'alt')
+        OR ((needle ? 'alt') AND q @> (needle -> 'alt'));
+  ELSIF node ? 'exists' THEN
+    RETURN eql_v4.json_tree_path_exists(d, node ->> 'exists');
+  ELSIF node ? 'cmp' THEN
+    bounds := node -> 'cmp';
+    entry := eql_v4.json_tree_path_query_first(
+      d, COALESCE(bounds -> 'gt', bounds -> 'gte', bounds -> 'lt', bounds -> 'lte') ->> 's');
+    RETURN eql_v4_internal.json_tree_within_bounds(entry, bounds);
+  ELSE
+    RETURN eql_v4_internal.json_tree_element_match_opened(iv, sv, tags, node -> 'elements');
+  END IF;
+END;
+$$;
+
+--! @brief Whether a document satisfies a compiled predicate.
+--!
+--! The one-parameter form of a filter over a JSON tree column, for a
+--! compiler that targets plaintext `jsonb_path_match(col, $1, $2)`: Stack
+--! Encrypt's `match` operator compiles the jsonpath predicate and its
+--! values into `p`, and the tree is evaluated here, each leaf as its
+--! operator answers on the column (see
+--! eql_v4_internal.json_tree_match_node). The answer is the
+--! hand-written WHERE's: `{"and": [{"exists": s}, {"cmp": {"lt": l}}]}` is
+--! `eql_v4.json_tree_path_exists(col, s) AND (col -> s) < l`, NULL
+--! where that is NULL.
+--!
+--! The document is decompressed once, and indexed once when the predicate
+--! has an element leaf, however many leaves read it. The `exists` and
+--! `cmp` leaves each scan the decompressed entries, as their functions do.
+--! Whether the predicate has an element leaf is one walk of the predicate,
+--! which is small, per row: the projection `q` is read without asking, as
+--! one key of the decompressed document costs less than the walk.
+--!
+--! @param e public.eql_v4_json_search The stored document.
+--! @param p eql_v4.query_json_predicate The predicate.
+--! @return boolean The predicate's answer: true, false, or NULL as SQL's
+--!         three-valued logic gives it; NULL when either argument is NULL.
+--! @throws invalid_parameter_value As eql_v4.json_tree_element_match,
+--!         from an element leaf that is read.
+--! @note plpgsql, and so opaque to the planner: the call filters a scan,
+--!       and engages no index. Written out per operator, the same predicate
+--!       engages the GIN index on eql_v4.json_tree_query(col) and the
+--!       functional btrees on eql_v4.ord_term(col -> s), so narrow the
+--!       rows with an indexed predicate beside it, or write the operators.
+--! @see eql_v4.query_json_predicate
+CREATE FUNCTION eql_v4.json_tree_match(e public.eql_v4_json_search, p eql_v4.query_json_predicate)
+  RETURNS boolean
+  LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+DECLARE
+  -- The document, decompressed once.
+  d jsonb := e::jsonb #> '{}'::text[];
+  node jsonb := p::jsonb;
+  sv jsonb;
+  q jsonb;
+  iv bytea;
+  tags jsonb;
+BEGIN
+  q := d -> 'q';
+  IF node @? '$.**.elements' THEN
+    sv := d -> 'sv';
+    iv := eql_v4_internal.json_tree_iv(d ->> 'h');
+    SELECT idx.nodes INTO tags FROM eql_v4_internal.json_tree_index(d) AS idx;
+  END IF;
+  RETURN eql_v4_internal.json_tree_match_node(d, sv, q, iv, tags, node);
+END;
+$$;
+
+--! @brief @@ operator with a compiled predicate: eql_v4.json_tree_match.
+--!
+--! `col @@ $1::eql_v4.query_json_predicate`. The operand MUST carry the
+--! domain's type, as a typed parameter or an explicit cast; `@@` with a
+--! `jsonpath` operand is blocked (blockers.sql), since the database cannot
+--! evaluate a path over ciphertext.
+--!
+--! @param a public.eql_v4_json_search The stored document.
+--! @param b eql_v4.query_json_predicate The predicate.
+--! @return boolean As eql_v4.json_tree_match.
+CREATE FUNCTION eql_v4."@@"(a public.eql_v4_json_search, b eql_v4.query_json_predicate)
+  RETURNS boolean
+  LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+AS $$
+  SELECT eql_v4.json_tree_match(a, b)
+$$;
+
+CREATE OPERATOR @@(
+  FUNCTION=eql_v4."@@",
+  LEFTARG=public.eql_v4_json_search,
+  RIGHTARG=eql_v4.query_json_predicate
 );
 -- AUTOMATICALLY GENERATED FILE.
 
@@ -56485,8 +57292,8 @@ $do$;
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_bigint_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -56662,7 +57469,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_bigint_range_ore)`.
 --!
 --! @param a public.eql_v4_bigint_ord_ore Encrypted column value
@@ -56697,7 +57504,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_bigint_range_ope)`.
 --!
 --! @param a public.eql_v4_bigint_ord Encrypted column value
@@ -56727,7 +57534,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_bigint_range_ope)`.
 --!
 --! @param a public.eql_v4_bigint_ord_ope Encrypted column value
@@ -56761,8 +57568,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_date_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -56938,7 +57745,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_date_range_ore)`.
 --!
 --! @param a public.eql_v4_date_ord_ore Encrypted column value
@@ -56973,7 +57780,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_date_range_ope)`.
 --!
 --! @param a public.eql_v4_date_ord Encrypted column value
@@ -57003,7 +57810,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_date_range_ope)`.
 --!
 --! @param a public.eql_v4_date_ord_ope Encrypted column value
@@ -57037,8 +57844,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_double_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -57214,7 +58021,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_double_range_ore)`.
 --!
 --! @param a public.eql_v4_double_ord_ore Encrypted column value
@@ -57249,7 +58056,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_double_range_ope)`.
 --!
 --! @param a public.eql_v4_double_ord Encrypted column value
@@ -57279,7 +58086,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_double_range_ope)`.
 --!
 --! @param a public.eql_v4_double_ord_ope Encrypted column value
@@ -57313,8 +58120,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_integer_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -57490,7 +58297,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_integer_range_ore)`.
 --!
 --! @param a public.eql_v4_integer_ord_ore Encrypted column value
@@ -57525,7 +58332,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_integer_range_ope)`.
 --!
 --! @param a public.eql_v4_integer_ord Encrypted column value
@@ -57555,7 +58362,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_integer_range_ope)`.
 --!
 --! @param a public.eql_v4_integer_ord_ope Encrypted column value
@@ -57589,8 +58396,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_numeric_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -57766,7 +58573,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_numeric_range_ore)`.
 --!
 --! @param a public.eql_v4_numeric_ord_ore Encrypted column value
@@ -57801,7 +58608,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_numeric_range_ope)`.
 --!
 --! @param a public.eql_v4_numeric_ord Encrypted column value
@@ -57831,7 +58638,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_numeric_range_ope)`.
 --!
 --! @param a public.eql_v4_numeric_ord_ope Encrypted column value
@@ -57865,8 +58672,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_real_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -58042,7 +58849,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_real_range_ore)`.
 --!
 --! @param a public.eql_v4_real_ord_ore Encrypted column value
@@ -58077,7 +58884,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_real_range_ope)`.
 --!
 --! @param a public.eql_v4_real_ord Encrypted column value
@@ -58107,7 +58914,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_real_range_ope)`.
 --!
 --! @param a public.eql_v4_real_ord_ope Encrypted column value
@@ -58141,8 +58948,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_smallint_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -58318,7 +59125,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_smallint_range_ore)`.
 --!
 --! @param a public.eql_v4_smallint_ord_ore Encrypted column value
@@ -58353,7 +59160,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_smallint_range_ope)`.
 --!
 --! @param a public.eql_v4_smallint_ord Encrypted column value
@@ -58383,7 +59190,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_smallint_range_ope)`.
 --!
 --! @param a public.eql_v4_smallint_ord_ope Encrypted column value
@@ -58417,8 +59224,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_text_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -58594,7 +59401,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_text_range_ore)`.
 --!
 --! @param a public.eql_v4_text_ord_ore Encrypted column value
@@ -58629,7 +59436,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_text_range_ore)`.
 --!
 --! @param a public.eql_v4_text_search_ore Encrypted column value
@@ -58664,7 +59471,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_text_range_ope)`.
 --!
 --! @param a public.eql_v4_text_ord Encrypted column value
@@ -58694,7 +59501,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_text_range_ope)`.
 --!
 --! @param a public.eql_v4_text_ord_ope Encrypted column value
@@ -58724,7 +59531,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_text_range_ope)`.
 --!
 --! @param a public.eql_v4_text_search Encrypted column value
@@ -58758,8 +59565,8 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!       `{"v": 4, "i": {...}, "lo": <term>, "hi": <term>}`. Each bound is the
 --!       single-bound query domain's `ob` (ORE) or `op` (OPE) value, in a
 --!       `{v, i, lo, hi}` envelope. Both bounds are included. There is one
---!       range domain per ordering term the family stores (ADR-0009,
---!       decisions 7 and 8).
+--!       range domain per ordering term the family stores (Stack Encrypt
+--!       ADR-0009, decisions 7 and 8).
 --! @note Cast the range parameter to its exact range domain
 --!       (`$1::eql_v4.query_timestamp_range_ore`). An uncast `$1`, a `jsonb`
 --!       parameter, or a range of another term or family fails with 42725
@@ -58935,7 +59742,7 @@ AS $$ SELECT eql_v4_internal.ope_cllw(jsonb_build_object('op', r::jsonb -> 'hi')
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term_ore(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_timestamp_range_ore)`.
 --!
 --! @param a public.eql_v4_timestamp_ord_ore Encrypted column value
@@ -58970,7 +59777,7 @@ AS $$ SELECT eql_v4.ord_term_ore(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_timestamp_range_ope)`.
 --!
 --! @param a public.eql_v4_timestamp_ord Encrypted column value
@@ -59000,7 +59807,7 @@ AS $$ SELECT eql_v4.ord_term(a) >= eql_v4_internal.lo(r) AND eql_v4.ord_term(a) 
 --!
 --! True when `eql_v4_internal.lo(r) <= eql_v4.ord_term(a) <= eql_v4_internal.hi(r)`.
 --! The range is one operand, so a statement cannot pair the low bound of one
---! query with the high bound of another (ADR-0009, decision 7):
+--! query with the high bound of another (Stack Encrypt ADR-0009, decision 7):
 --! `WHERE eql_v4.between(col, $1::eql_v4.query_timestamp_range_ope)`.
 --!
 --! @param a public.eql_v4_timestamp_ord_ope Encrypted column value
@@ -59034,7 +59841,7 @@ DROP FUNCTION IF EXISTS eql_v4.version();
 --! @brief EQL version reporting (self-contained eql_v4 surface)
 --!
 --! This file is auto-generated from src/v3/version.template during build.
---! The go-0.1.0-rc.2 placeholder is replaced with the actual release
+--! The go-0.1.0-rc.4 placeholder is replaced with the actual release
 --! version (bare semver, e.g. "3.0.0") supplied via `mise run build --version`,
 --! or "DEV" for development builds.
 
@@ -59053,14 +59860,14 @@ CREATE FUNCTION eql_v4.version()
   RETURNS text
   IMMUTABLE STRICT PARALLEL SAFE
 AS $$
-  SELECT 'go-0.1.0-rc.2';
+  SELECT 'go-0.1.0-rc.4';
 $$ LANGUAGE SQL;
 
 --! @brief Schema-level version marker for obj_description() discoverability
 --!
 --! Mirrors eql_v4.version() as a comment on the schema so the installed
 --! version can also be read via obj_description('eql_v4'::regnamespace).
-COMMENT ON SCHEMA eql_v4 IS 'go-0.1.0-rc.2';
+COMMENT ON SCHEMA eql_v4 IS 'go-0.1.0-rc.4';
 --! @file pin_search_path_v3.sql
 --! @brief Post-install: pin search_path on every eql_v4.* function.
 --!
