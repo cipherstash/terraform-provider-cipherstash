@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/</loc>
+      </url>
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/data-sources/zerokms_client/</loc>
+      </url>
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/guides/eql-quickstart/</loc>
+      </url>
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/resources/cts_actor/</loc>
+      </url>
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/resources/eql_v4/</loc>
+      </url>
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/resources/zerokms_client/</loc>
+      </url>
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/resources/zerokms_keyset/</loc>
+      </url>
+      <url>
+        <loc>https://cipherstash.github.io/terraform-provider-cipherstash/resources/zerokms_keyset_grant/</loc>
+      </url>
+</urlset>
