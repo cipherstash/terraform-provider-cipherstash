@@ -1,14 +1,14 @@
 [
   {
-    "eqlVersion": "go-0.1.0-rc.3",
-    "releaseTag": "languages/golang/v0.1.0-rc.3",
-    "installSqlSha256": "58f96a4dc78e12aa4ff29124534e49197967bce2fca8fecb5ea0942ca68b9f3e",
-    "uninstallSqlSha256": "7bd775ce3769e0b1f9fc25e994112218817419523371f5ddc45b0a81db348315"
-  },
-  {
     "eqlVersion": "go-0.1.0-rc.4",
     "releaseTag": "languages/golang/v0.1.0-rc.4",
     "installSqlSha256": "ef8c44f57f3a7d7f83e6ebd5f8c479cb6243e862af0ff3132d30ff1c68b831f3",
+    "uninstallSqlSha256": "7bd775ce3769e0b1f9fc25e994112218817419523371f5ddc45b0a81db348315"
+  },
+  {
+    "eqlVersion": "go-0.1.0-rc.5",
+    "releaseTag": "languages/golang/v0.1.0-rc.5",
+    "installSqlSha256": "a8de4794483153f40b941b460012a91295464e383f73b30af0b769b61754c511",
     "uninstallSqlSha256": "7bd775ce3769e0b1f9fc25e994112218817419523371f5ddc45b0a81db348315"
   }
 ]

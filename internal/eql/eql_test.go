@@ -142,7 +142,7 @@ func testRole(t *testing.T, database *pgx.ConnConfig) *pgx.ConnConfig {
 	return config
 }
 
-const version = "go-0.1.0-rc.4"
+const version = "go-0.1.0-rc.5"
 
 func TestPostgresInstallAndInspect(t *testing.T) {
 	database := testDatabase(t)
@@ -557,7 +557,7 @@ func TestPostgresUninstallPartialInstallation(t *testing.T) {
 
 func TestLater(t *testing.T) {
 	versions := Versions()
-	require.Equal(t, []string{"go-0.1.0-rc.3", "go-0.1.0-rc.4"}, versions, "versions follow releases.json")
+	require.Equal(t, []string{"go-0.1.0-rc.4", "go-0.1.0-rc.5"}, versions, "versions follow releases.json")
 	require.True(t, Later(versions[0], versions[1]))
 	require.False(t, Later(versions[1], versions[0]), "downgrade")
 	require.False(t, Later(versions[0], versions[0]), "same version")
@@ -565,7 +565,7 @@ func TestLater(t *testing.T) {
 	require.False(t, Later(versions[0], "go-9.9.9"), "to a version that is not compiled in")
 }
 
-const upgradeFrom, upgradeTo = "go-0.1.0-rc.3", "go-0.1.0-rc.4"
+const upgradeFrom, upgradeTo = "go-0.1.0-rc.4", "go-0.1.0-rc.5"
 
 // indexedTable creates a table with an index for each kind of query EQL
 // documents, one with a comment and one marked for CLUSTER.
@@ -665,11 +665,9 @@ REVOKE USAGE ON TYPE eql_v4.query_bigint_ord FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA eql_v4, eql_v4_internal GRANT EXECUTE ON FUNCTIONS TO %[1]s;
 ALTER DEFAULT PRIVILEGES IN SCHEMA eql_v4, eql_v4_internal GRANT USAGE ON TYPES TO %[1]s;
 ALTER DEFAULT PRIVILEGES FOR ROLE %[2]s IN SCHEMA eql_v4 GRANT EXECUTE ON FUNCTIONS TO %[2]s`, app.User, outsider.User))
-	// rc.3 and rc.4 ship the same SQL, so the upgrade would neither add nor
-	// remove a routine. Make it do both: drop one that the new release creates
-	// again, and add one with a grant that the new release doesn't have.
+	// rc.5 adds routines but removes none, so add one with a grant that the new
+	// release doesn't have.
 	exec(t, conn, fmt.Sprintf(`
-DROP ROUTINE eql_v4.grouped_value(jsonb);
 CREATE FUNCTION eql_v4.retired() RETURNS int LANGUAGE sql AS 'SELECT 1';
 GRANT EXECUTE ON FUNCTION eql_v4.retired() TO %s`, app.User))
 	beforeIndexes, beforePrivileges, beforeObjects := indexes(t, conn), privileges(t, conn), eqlObjects(t, conn)
@@ -706,7 +704,7 @@ GRANT EXECUTE ON FUNCTION eql_v4.retired() TO %s`, app.User))
 		}
 	}
 
-	require.Equal(t, []string{"routine eql_v4.grouped_value(jsonb)"}, added)
+	require.NotEmpty(t, added, "rc.5 adds routines")
 	for _, object := range added {
 		require.Contains(t, afterPrivileges[object], app.User+"=", object)
 		require.NotContains(t, afterPrivileges[object], outsider.User+"=", object)
