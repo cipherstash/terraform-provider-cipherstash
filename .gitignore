@@ -10,3 +10,4 @@
 crash.log
 .amp/portals/*
 /site/
+/dist/

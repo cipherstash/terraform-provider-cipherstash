@@ -1,0 +1,36 @@
+# Builds the provider for each platform into a zip with a SHA256SUMS file. The
+# Release workflow (.github/workflows/release.yml) runs it with --skip=publish
+# and attaches the files to the GitHub release itself. The bytes depend only
+# on the tagged commit and the Go version in mise.toml: -trimpath, no build ID,
+# and file times set to the commit time, so anyone can rebuild an archive and
+# compare its digest.
+version: 2
+
+project_name: terraform-provider-cipherstash
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -buildid=
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    binary: "{{ .ProjectName }}_v{{ .Version }}"
+
+archives:
+  - formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - src: LICENSE.md
+        info:
+          mtime: "{{ .CommitDate }}"
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+
+changelog:
+  disable: true

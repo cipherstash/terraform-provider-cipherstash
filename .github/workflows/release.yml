@@ -1,0 +1,316 @@
+name: Release
+
+# Tags a release of the provider and attaches its builds to a GitHub release,
+# the way cipherstash/stack releases its Go SDK (release-golang.yml). Run by
+# hand:
+#
+#   gh workflow run release.yml -f version=0.1.0 --ref main
+#
+# Versions are 0.MINOR.PATCH until the API settles: a release with a breaking
+# change or a feature bumps MINOR, a release with only fixes bumps PATCH. A
+# final version is cut from main only; a pre-release (a version with a
+# -suffix, such as 0.2.0-beta.1) may be cut from any branch and is published as
+# a GitHub pre-release. The tag is v<version> on the dispatched commit. Other
+# projects import pkg/stack, so the tag is also a Go module version, and a Go
+# module version is immutable once the proxy has fetched it: a tag is never
+# moved or deleted. If `publish` or `verify` fails after the tag is pushed, use
+# "Re-run failed jobs" on the same run; `publish` accepts the tag an earlier
+# attempt of the run pushed and creates or completes the release. A new
+# dispatch of the same version is refused.
+#
+# Three jobs, split by what they may touch:
+#
+# - `build` holds no write token and restores no cache. It is the only job
+#   that runs third-party code (the toolchain installs, the tests, GoReleaser
+#   and go build). It hands the zips and SHA256SUMS to `publish` as an
+#   artifact.
+# - `publish` holds `contents: write` and runs only git and gh. It pushes the
+#   tag and creates the release. The `release` environment gates it when
+#   required reviewers are set on it in the repository settings.
+# - `verify` is read-only again: it checks the release's assets are the ones
+#   built, and asks the Go proxy for the version, which fetches it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the leading v, e.g. 0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  MODULE: github.com/cipherstash/terraform-provider-cipherstash
+  # The release assets, as GoReleaser names them (.goreleaser.yaml).
+  PLATFORMS: linux_amd64 linux_arm64 darwin_amd64 darwin_arm64
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and test the release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ inputs.version }}
+      # Adds GoReleaser from mise.release.toml to the tools in mise.toml.
+      MISE_ENV: release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      # Before anything is built: every version Go or Terraform would refuse,
+      # or read as something else, fails here rather than after the tag is
+      # pushed.
+      - name: Check the version and the ref
+        run: |
+          set -euo pipefail
+          num='(0|[1-9][0-9]*)'
+          ident='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          if ! [[ "$VERSION" =~ ^$num\.$num\.$num(-$ident(\.$ident)*)?$ ]]; then
+            echo "::error::'$VERSION' is not MAJOR.MINOR.PATCH[-PRERELEASE] without a leading v, leading zeros or +build metadata (e.g. 0.1.0 or 0.2.0-beta.1)"
+            exit 1
+          fi
+          # The module path has no /vN suffix, so Go accepts only v0 and v1.
+          if [[ "${VERSION%%.*}" != 0 && "${VERSION%%.*}" != 1 ]]; then
+            echo "::error::$MODULE can only publish major version 0 or 1; v2 and later need a /v2 suffix on the module path first"
+            exit 1
+          fi
+          # golang.org/x/mod/module's pseudo-version pattern: Go reads such a
+          # tag as a timestamp and commit, not as a version.
+          if [[ "v$VERSION" =~ ^v[0-9]+\.(0\.0-|[0-9]+\.[0-9]+-([^+]*\.)?0\.)[0-9]{14}-[A-Za-z0-9]+$ ]]; then
+            echo "::error::'$VERSION' has the shape of a Go pseudo-version"
+            exit 1
+          fi
+          if [[ "$VERSION" != *-* && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::a final version is released from main only, this run is on $GITHUB_REF; dispatch from main, or give a pre-release version such as $VERSION-beta.1"
+            exit 1
+          fi
+
+      - name: Refuse a tag that already exists
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::v$VERSION already exists; a version is immutable once released. To finish a failed release, re-run its failed jobs instead."
+            exit 1
+          fi
+
+      # Catches a version whose tag was deleted after the Go proxy fetched it:
+      # the proxy goes on serving the old contents. It reads @v/list and never
+      # asks for the version itself, because the proxy would cache "not found"
+      # for up to 30 minutes and `verify` would fail after the push.
+      - name: Refuse a version the Go proxy already lists
+        run: |
+          set -euo pipefail
+          list=$(curl -fsS --retry 3 "https://proxy.golang.org/$MODULE/@v/list") \
+            || { echo "::error::could not read the Go proxy's version list for $MODULE"; exit 1; }
+          if grep -qxF "v$VERSION" <<< "$list"; then
+            echo "::error::the Go proxy already lists $MODULE v$VERSION; its contents are fixed even though the tag is gone. Release a new version."
+            exit 1
+          fi
+
+      # No cache: this job builds the binaries that are published, and a
+      # poisoned restore would ship in them.
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          cache: false
+
+      - name: Tests, vet and formatting
+        run: mise run check
+
+      # GoReleaser takes the version from a tag on the commit. This one stays
+      # local; `publish` creates and pushes the real tag.
+      - name: Build the archives
+        run: |
+          set -euo pipefail
+          git -c user.name=release -c user.email=release@invalid tag -a "v$VERSION" -m "v$VERSION"
+          goreleaser release --skip=publish --clean
+          cat "dist/terraform-provider-cipherstash_${VERSION}_SHA256SUMS"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release
+          path: |
+            dist/*.zip
+            dist/*_SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Tag and release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      # Push the tag and create the release.
+      contents: write
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      # Not actions/checkout: its `token` input defaults to github.token, which
+      # in this job can write. The repository is public, so the history and
+      # tags are fetched without a credential, and without file contents,
+      # which no step reads. The token is handed to the one
+      # push below, and to gh, and to nothing else.
+      - name: Fetch the commit without a credential
+        run: |
+          set -euo pipefail
+          git init -q .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch -q --filter=blob:none --tags origin "$GITHUB_SHA"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+          path: release-out
+
+      # The artifact comes from a job that ran third-party code, so it must be
+      # exactly the expected files, each matching SHA256SUMS.
+      - name: Check the archives
+        working-directory: release-out
+        run: |
+          set -euo pipefail
+          sums="terraform-provider-cipherstash_${VERSION}_SHA256SUMS"
+          expected=$(for platform in $PLATFORMS; do echo "terraform-provider-cipherstash_${VERSION}_${platform}.zip"; done | sort)
+          if [ "$(awk '{print $2}' "$sums" | sort)" != "$expected" ] || [ "$(find . -mindepth 1 ! -name "$sums" -printf '%P\n' | sort)" != "$expected" ]; then
+            echo "::error::the artifact is not exactly one zip for each of $PLATFORMS and $sums"
+            exit 1
+          fi
+          sha256sum -c "$sums"
+
+      # Lists the BREAKING CHANGE: paragraph of every commit since the previous
+      # v* tag. The first release has no previous tag, so no list.
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          previous=$(git describe --tags --abbrev=0 --match 'v*' --exclude "v$VERSION" "$GITHUB_SHA" 2>/dev/null || true)
+          {
+            echo "Terraform provider \`cipherstash/cipherstash\` v$VERSION, built from $GITHUB_SHA."
+            echo
+            if [ -n "$previous" ]; then
+              echo "## Breaking changes since $previous"
+              echo
+              breaking=$(git log --format='%H' "$previous..$GITHUB_SHA" | while read -r commit; do
+                text=$(git log -1 --format=%B "$commit" | awk '/^BREAKING CHANGE:/{p=1; sub(/^BREAKING CHANGE: */, "")} p&&/^$/{exit} p' | tr '\n' ' ' | sed 's/ *$//')
+                if [ -n "$text" ]; then echo "- $(git log -1 --format=%s "$commit") (${commit:0:7}): $text"; fi
+              done)
+              echo "${breaking:-None.}"
+              echo
+            fi
+            echo "## Install"
+            echo
+            echo "Put the zips in a Terraform filesystem mirror under the source address your configuration uses, then record each platform's hash:"
+            echo
+            echo '```sh'
+            echo "mkdir -p mirror/registry.terraform.io/cipherstash/cipherstash"
+            echo "gh release download v$VERSION -R $GITHUB_REPOSITORY -p '*.zip' -D mirror/registry.terraform.io/cipherstash/cipherstash"
+            echo "terraform providers lock -fs-mirror=mirror$(for platform in $PLATFORMS; do printf ' -platform=%s' "$platform"; done)"
+            echo '```'
+            echo
+            echo "SHA-256 of the archives:"
+            echo
+            echo '```'
+            cat "release-out/terraform-provider-cipherstash_${VERSION}_SHA256SUMS"
+            echo '```'
+          } > notes.md
+          cat notes.md
+
+      # A tag already there is accepted only if an earlier attempt of this run
+      # pushed it on the same commit.
+      - name: Push the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            git fetch -q --no-tags --filter=blob:none origin "+refs/tags/$tag:refs/existing-release"
+            if [ "$(git rev-parse 'refs/existing-release^{commit}')" = "$GITHUB_SHA" ]; then
+              echo "$tag was pushed by an earlier attempt of this run; keeping it"
+              exit 0
+            fi
+            echo "::error::$tag already exists on another commit"
+            exit 1
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            tag -a "$tag" -m "Terraform provider v$VERSION (built from $GITHUB_SHA)" "$GITHUB_SHA"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$tag"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          assets=(release-out/*)
+          if gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "the release for $tag exists from an earlier attempt; replacing its assets"
+            gh release upload "$tag" -R "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+            exit 0
+          fi
+          prerelease=()
+          if [[ "$VERSION" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --verify-tag "${prerelease[@]}" \
+            --title "Terraform provider v$VERSION" --notes-file notes.md "${assets[@]}"
+
+  verify:
+    name: Check the release and the Go proxy
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4
+        with:
+          version: 2026.4.0
+          install: true
+          install_args: go
+          cache: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release
+          path: release-out
+
+      - name: Check the release assets are the ones built
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sums="terraform-provider-cipherstash_${VERSION}_SHA256SUMS"
+          mkdir released
+          gh release download "v$VERSION" -R "$GITHUB_REPOSITORY" -D released
+          cmp "release-out/$sums" "released/$sums"
+          (cd released && sha256sum -c "$sums")
+
+      # The proxy fetches a version the first time it is asked for it, so this
+      # also makes the version available to importers of pkg/stack. It runs
+      # from an empty directory so nothing in this checkout can answer for the
+      # proxy.
+      - name: Download the version through the Go proxy
+        env:
+          GOPROXY: https://proxy.golang.org
+          GOFLAGS: ""
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          for _ in 1 2 3 4 5 6; do
+            if go mod download -json "$MODULE@v$VERSION" | jq -e '.Dir' >/dev/null; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::the Go proxy did not resolve v$VERSION"
+          exit 1
